@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+
+# Python Cache
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Build
+build/
+dist/
+
+# Frontend (Not needed in backend image)
+frontend/
+
+# Documentation
+README.md
+LICENSE
+
+# OS Files
+.DS_Store
+Thumbs.db

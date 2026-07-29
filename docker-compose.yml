@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    container_name: marketing-backend
+
+    ports:
+      - "8040:8040"
+
+    env_file:
+      - ./.env
+
+    restart: unless-stopped
