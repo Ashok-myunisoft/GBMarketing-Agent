@@ -10,7 +10,8 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 MASTER_EXPORT_PATH = BACKEND_DIR / "exports" / "All_Extracted_Leads.xlsx"
 
 EXPORT_COLUMNS = [
-    ("Company Name", "company_name"), ("GST", "gst"), ("Turn Over", "turnover"),
+    ("Company Name", "company_name"), ("GST", "gst"), ("GST Confidence", "gst_confidence"),
+    ("GST Sources", "gst_sources"), ("Turn Over", "turnover"),
     ("Region", "region"), ("City", "city"), ("Industry Type", "industry"),
     ("Contact Person", "contact_person"), ("Designation", "designation"),
     ("Mobile Number", "phone"), ("Alternate Mobile Number", "phone_alt"),
@@ -33,7 +34,15 @@ class ExportAgent(BaseClass):
             from openpyxl import load_workbook
             workbook = load_workbook(path)
             sheet = workbook["Leads"] if "Leads" in workbook.sheetnames else workbook.active
-            if [cell.value for cell in sheet[1]] != headers:
+            existing_headers = [cell.value for cell in sheet[1]]
+            legacy_headers = [header for header, _ in EXPORT_COLUMNS if header not in {"GST Confidence", "GST Sources"}]
+            if existing_headers == legacy_headers:
+                sheet.insert_cols(3, amount=2)
+                sheet.cell(1, 3, "GST Confidence")
+                sheet.cell(1, 4, "GST Sources")
+                for cell in sheet[1]:
+                    cell.font = Font(bold=True)
+            elif existing_headers != headers:
                 raise ValueError(f"Master export has unexpected headers: {path}")
         else:
             workbook = Workbook()

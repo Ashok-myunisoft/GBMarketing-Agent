@@ -17,8 +17,7 @@ from services.browser_service import BrowserService
 from services.geocoding_service import GeoapifyGeocodingService
 from services.filesure_service import FileSureService
 from services.gst_turnover_service import GstTurnoverService
-from services.llm_services import LLMService
-from services.prompt_service import PromptService
+from services.gst_enrichment_service import GstEnrichmentService
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,6 @@ MAX_PDF_BYTES = 5 * 1024 * 1024
 GSTIN_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 TOFLER_URL = "https://www.tofler.in/"
 TOFLER_SEARCH_INPUT = 'input[placeholder="Search company, CIN OR DIN"]'
-GOOGLE_SEARCH_URL = "https://www.google.com/search?q="
 LINKEDIN_LOGIN_URL = "https://www.linkedin.com/login"
 LINKEDIN_PEOPLE_SEARCH_URL = "https://www.linkedin.com/search/results/people/?keywords="
 NAME_EXCLUDE_WORDS = {
@@ -103,8 +101,7 @@ class EnrichmentAgent(BaseClass):
         self._geocoder = geocoder or GeoapifyGeocodingService()
         self._filesure = filesure or FileSureService()
         self._turnover = turnover or GstTurnoverService()
-        self._prompt_service = PromptService()
-        self._llm: Optional[LLMService] = None
+        self._gst_enrichment = GstEnrichmentService(self._browser)
         self._linkedin_context: Optional[BrowserContext] = None
         self._linkedin_authenticated = False
         self._linkedin_unavailable = False
@@ -157,20 +154,35 @@ class EnrichmentAgent(BaseClass):
         linkedin_url = None
         phones: list[str] = []
         gst = company.gst
+        gst_confidence = company.gst_confidence
+        gst_sources = company.gst_sources
         cin = company.cin
         turnover = company.turnover
+        official_name: Optional[str] = None
+        official_url: Optional[str] = None
 
         if company.website and company.website.startswith("http"):
             (
                 email, address, contact_person, designation, linkedin_url,
-                website_gst, website_cin, website_phones,
+                _website_gst, website_cin, website_phones, official_name, official_url, official_text,
             ) = self._enrich_from_website(company)
-            gst = gst or website_gst
             cin = cin or website_cin
             phones.extend(website_phones)
+            # GST discovery is evidence based. The original search-result name
+            # is never reused once Playwright has identified the official name.
+            if official_name and official_url:
+                gst_result = self._gst_enrichment.resolve(
+                    official_name,
+                    official_url,
+                    address or company.address,
+                    known_pages=[(official_url, official_text)],
+                )
+                gst = gst_result.gst_number
+                gst_confidence = gst_result.confidence if gst else None
+                gst_sources = gst_result.source
 
         if email is None or address is None:
-            tofler_address, tofler_email = self._lookup_tofler(company.company_name)
+            tofler_address, tofler_email = self._lookup_tofler(official_name or company.company_name)
             email = email or tofler_email
             address = address or tofler_address
 
@@ -180,11 +192,6 @@ class EnrichmentAgent(BaseClass):
             gst = gst or filesure_data.gst
             contact_person = contact_person or filesure_data.contact_person
             designation = designation or filesure_data.designation
-
-        # Google often exposes a GSTIN in a result snippet even when the
-        # company site does not publish it. Only accept checksum-valid GSTINs.
-        if not gst:
-            gst = self._lookup_gst_on_google(company.company_name)
 
         # LinkedIn is a last resort: company websites and public registries
         # remain the preferred sources for named contacts.
@@ -229,12 +236,14 @@ class EnrichmentAgent(BaseClass):
         if all(
             v is None
             for v in (email, address, contact_person, designation, linkedin_url, gst, cin, turnover)
-        ) and phone_alt is None:
+        ) and phone_alt is None and official_name is None:
             return company
 
         return company.model_copy(
             update={
                 "email": email or company.email,
+                "company_name": official_name or company.company_name,
+                "website": official_url or company.website,
                 "address": address or company.address,
                 "contact_person": contact_person or company.contact_person,
                 "designation": designation or company.designation,
@@ -242,6 +251,8 @@ class EnrichmentAgent(BaseClass):
                 "phone": phone,
                 "phone_alt": phone_alt,
                 "gst": gst,
+                "gst_confidence": gst_confidence,
+                "gst_sources": gst_sources,
                 "cin": cin,
                 "turnover": turnover,
                 "city": city or company.city,
@@ -249,50 +260,6 @@ class EnrichmentAgent(BaseClass):
                 "region": region or company.region,
             }
         )
-
-    def _lookup_gst_on_google(self, company_name: str) -> Optional[str]:
-        """Uses the exact company-GST Google query and the GST prompt template."""
-        try:
-            page = self._browser.new_page()
-            try:
-                search_query = f'"{company_name}" gst number'
-                self._browser.goto(page, f"{GOOGLE_SEARCH_URL}{quote_plus(search_query)}")
-                page.wait_for_timeout(1500)
-                result_text = page.locator("body").inner_text(timeout=5000)
-                return self._extract_gst_with_prompt(company_name, search_query, result_text)
-            finally:
-                page.close()
-        except Exception as ex:
-            logger.warning("Google GST lookup failed for '%s': %s", company_name, ex)
-            return None
-
-    def _extract_gst_with_prompt(
-        self, company_name: str, search_query: str, result_text: str
-    ) -> Optional[str]:
-        """Uses the GST prompt template to select a candidate from Google text."""
-        if not result_text.strip():
-            return None
-        try:
-            template = self._prompt_service.load("gst_enrichment")
-            system_prompt = (
-                template
-                .replace("{{company_name}}", company_name)
-                .replace("{{search_query}}", search_query)
-            )
-            user_prompt = f"Google result text:\n{result_text[:12000]}"
-            if self._llm is None:
-                self._llm = LLMService()
-            response = self._llm.invoke(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=0.0,
-                max_tokens=100,
-            )
-            candidate = json.loads(response).get("gst")
-            return self._valid_gstin_from_text(str(candidate or ""))
-        except Exception as ex:
-            logger.info("GST prompt extraction unavailable for '%s': %s", company_name, ex)
-            return None
 
     def _lookup_linkedin_contact(
         self, company: Company
@@ -402,7 +369,7 @@ class EnrichmentAgent(BaseClass):
 
     def _enrich_from_website(
         self, company: Company
-    ) -> "tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], list[str]]":
+    ) -> "tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], list[str], Optional[str], Optional[str], str]":
         """Returns email, address, contact, designation, LinkedIn URL, public GSTIN, CIN, and phone numbers found."""
 
         try:
@@ -412,6 +379,12 @@ class EnrichmentAgent(BaseClass):
                 self._browser.goto(page, company.website)
                 page.wait_for_timeout(1500)
 
+                official_name = self._extract_official_company_name(page)
+                official_url = page.url
+                try:
+                    official_text = page.locator("body").inner_text(timeout=5000)
+                except Exception:
+                    official_text = ""
                 email = self._extract_email(page)
                 address = self._extract_address(page)
                 contact_person, designation, linkedin_url = self._extract_contact(page)
@@ -442,7 +415,10 @@ class EnrichmentAgent(BaseClass):
 
                 gst = gst or pdf_gst
 
-                return email, address, contact_person, designation, linkedin_url, gst, cin, phones
+                return (
+                    email, address, contact_person, designation, linkedin_url, gst, cin, phones,
+                    official_name, official_url, official_text,
+                )
 
             finally:
                 page.close()
@@ -454,7 +430,65 @@ class EnrichmentAgent(BaseClass):
                 company.website,
                 ex,
             )
-            return None, None, None, None, None, None, None, []
+            return None, None, None, None, None, None, None, [], None, None, ""
+
+    @staticmethod
+    def _extract_official_company_name(page: Page) -> Optional[str]:
+        """Prefer legal/organisation metadata exposed by the official site."""
+        try:
+            structured = page.locator('script[type="application/ld+json"]')
+            for index in range(structured.count()):
+                raw = structured.nth(index).inner_text(timeout=1000)
+                try:
+                    legal_name = EnrichmentAgent._organisation_name_from_jsonld(json.loads(raw))
+                    if legal_name:
+                        return legal_name
+                except (TypeError, ValueError):
+                    continue
+            for selector in ('meta[property="og:site_name"]', 'meta[name="application-name"]'):
+                value = page.locator(selector).first.get_attribute("content")
+                if value and EnrichmentAgent._looks_like_company_name(value):
+                    return re.sub(r"\s+", " ", value).strip()
+            h1 = page.locator("h1").first.inner_text(timeout=1000)
+            if h1 and EnrichmentAgent._looks_like_company_name(h1):
+                return re.sub(r"\s+", " ", h1).strip()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _organisation_name_from_jsonld(value) -> Optional[str]:
+        """Get a legal/Organisation name without mistaking a product for one."""
+        if isinstance(value, list):
+            for item in value:
+                name = EnrichmentAgent._organisation_name_from_jsonld(item)
+                if name:
+                    return name
+            return None
+        if not isinstance(value, dict):
+            return None
+        legal_name = value.get("legalName")
+        if isinstance(legal_name, str) and EnrichmentAgent._looks_like_company_name(legal_name):
+            return re.sub(r"\s+", " ", legal_name).strip()
+        kind = value.get("@type", "")
+        kinds = {kind.lower()} if isinstance(kind, str) else {str(item).lower() for item in kind}
+        name = value.get("name")
+        if (
+            {"organization", "localbusiness", "corporation"} & kinds
+            and isinstance(name, str)
+            and EnrichmentAgent._looks_like_company_name(name)
+        ):
+            return re.sub(r"\s+", " ", name).strip()
+        graph = value.get("@graph")
+        return EnrichmentAgent._organisation_name_from_jsonld(graph) if graph else None
+
+    @staticmethod
+    def _looks_like_company_name(value: str) -> bool:
+        normalized = re.sub(r"\s+", " ", value or "").strip()
+        if not 2 <= len(normalized) <= 160 or "@" in normalized or "http" in normalized.lower():
+            return False
+        words = normalized.split()
+        return len(words) <= 16 and sum(char.isalpha() for char in normalized) >= 3
 
     def _lookup_tofler(self, company_name: str) -> "tuple[Optional[str], Optional[str]]":
         """Returns (address, email) from Tofler's free registered-details lookup, or (None, None)."""

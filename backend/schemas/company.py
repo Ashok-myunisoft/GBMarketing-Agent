@@ -15,6 +15,8 @@ class Company(BaseModel):
     turnover: Optional[str] = None
     employee_count: Optional[str] = None
     gst: Optional[str] = None
+    gst_confidence: Optional[int] = None
+    gst_sources: list[str] = Field(default_factory=list)
     cin: Optional[str] = None
     region: Optional[str] = None
     remarks: Optional[str] = None
