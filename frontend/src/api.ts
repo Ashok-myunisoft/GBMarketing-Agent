@@ -1,6 +1,6 @@
 import type { Job, JobEvent } from "./types";
 
-const API_BASE = "http://127.0.0.1:8040";
+const API_BASE = "http://217.217.249.121:8040";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
