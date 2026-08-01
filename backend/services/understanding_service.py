@@ -27,6 +27,15 @@ class UnderstandingService:
 
         )
 
+        response = response.strip()
+        if response.startswith("```"):
+            lines = response.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            response = "\n".join(lines).strip()
+
         try:
             data = json.loads(response)
         except json.JSONDecodeError as e:

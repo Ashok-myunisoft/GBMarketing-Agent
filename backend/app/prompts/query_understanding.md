@@ -17,6 +17,12 @@ Rules:
 - Do not explain.
 - Do not add markdown.
 - Do not search the internet.
+- This application supports only the `lead_generation` workflow. Always set
+  `workflow` to `lead_generation`, including requests phrased as "list",
+  "find", "show", or "all" industries/companies.
+- Extract the requested industry even when the intent is to list companies.
+  For example, "list all valve industries in Hyderabad" has industry `Valve`
+  and location `Hyderabad`.
 
 Example Output
 

@@ -1,5 +1,7 @@
 from agents.base_agent import BaseClass
 from orchestrator.workflow import WorkflowOrchestrator
+from orchestrator.workflow_registry import WORKFLOWS
+from config.targeting import match_target_industry
 from models.workflow_context import WorkflowContext
 from schemas.query_understanding import QueryUnderstanding
 
@@ -29,14 +31,20 @@ class PlannerAgent(BaseClass):
         # one operational workflow for company/industry listing requests, so
         # never let a missing optional LLM field turn a valid search into a
         # successful no-op.
-        workflow = self._optional_value(understanding.workflow) or "lead_generation"
+        requested_workflow = self._optional_value(understanding.workflow)
+        workflow = requested_workflow if requested_workflow in WORKFLOWS else "lead_generation"
+        industry = self._optional_value(understanding.industry)
+        # A specific industry in the original request is more reliable than a
+        # blank/incorrect LLM field. This also prevents a broad all-industry
+        # search when the user asked for a known target segment such as Valve.
+        industry = match_target_industry(user_query) or industry
 
         # Build the workflow context
         context = WorkflowContext(
             user_query=user_query,
             intent=self._optional_value(understanding.intent),
             workflow=workflow,
-            industry=self._optional_value(understanding.industry),
+            industry=industry,
             location=self._optional_value(understanding.location),
             buyer_persona=self._optional_value(understanding.buyer_persona),
             confidence=understanding.confidence,
