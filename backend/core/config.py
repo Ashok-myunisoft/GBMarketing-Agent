@@ -31,6 +31,20 @@ class Settings:
 
     PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
     PLAYWRIGHT_TIMEOUT_MS = int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "30000"))
+    # Enrichment uses independent browser sessions in a small worker pool.  A
+    # conservative default keeps third-party sites and APIs from being flooded.
+    ENRICHMENT_CONCURRENCY = max(1, int(os.getenv("ENRICHMENT_CONCURRENCY", "3")))
+    ENRICHMENT_MAX_SUPPLEMENTAL_PAGES = max(
+        0, int(os.getenv("ENRICHMENT_MAX_SUPPLEMENTAL_PAGES", "2"))
+    )
+    ENRICHMENT_PLAYWRIGHT_TIMEOUT_MS = max(
+        1_000, int(os.getenv("ENRICHMENT_PLAYWRIGHT_TIMEOUT_MS", "15000"))
+    )
+    # These two sources are both comparatively slow and have low coverage for
+    # the industrial-company searches this app targets.  They remain available
+    # as explicit opt-ins for a deep-enrichment run.
+    ENRICHMENT_LOOKUP_LINKEDIN = os.getenv("ENRICHMENT_LOOKUP_LINKEDIN", "false").lower() == "true"
+    ENRICHMENT_LOOKUP_TURNOVER = os.getenv("ENRICHMENT_LOOKUP_TURNOVER", "false").lower() == "true"
 
 
 settings = Settings()

@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import List, Optional
 from urllib.parse import quote_plus, urljoin, urlparse
@@ -35,7 +36,6 @@ CONTACT_PAGE_LINK_TEXT = (
     "contact", "about", "team", "management", "leadership", "legal",
     "privacy", "terms", "gst", "company-info",
 )
-MAX_SUPPLEMENTAL_PAGES = 5
 MAX_PDF_BYTES = 5 * 1024 * 1024
 GSTIN_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 TOFLER_URL = "https://www.tofler.in/"
@@ -97,7 +97,13 @@ class EnrichmentAgent(BaseClass):
         filesure: Optional[FileSureService] = None,
         turnover: Optional[GstTurnoverService] = None,
     ):
-        self._browser = browser or BrowserService()
+        # Enrichment is best-effort: a single unresponsive company site must
+        # not hold up an entire batch for the browser's general 30-second
+        # timeout and repeated retries.
+        self._browser = browser or BrowserService(
+            timeout_ms=settings.ENRICHMENT_PLAYWRIGHT_TIMEOUT_MS,
+            max_retries=1,
+        )
         self._geocoder = geocoder or GeoapifyGeocodingService()
         self._filesure = filesure or FileSureService()
         self._turnover = turnover or GstTurnoverService()
@@ -110,19 +116,20 @@ class EnrichmentAgent(BaseClass):
 
         print("\n========== Enrichment Agent Started ==========")
 
-        owns_lifecycle = not self._browser.is_running
-
-        if owns_lifecycle:
-            self._browser.start()
-
-        try:
-            enriched = [self._enrich(company) for company in companies]
-        finally:
-            if self._linkedin_context is not None:
-                self._linkedin_context.close()
-                self._linkedin_context = None
-            if owns_lifecycle:
-                self._browser.stop()
+        # Playwright's synchronous API is thread-affine, so every worker owns
+        # its own agent/browser rather than sharing this agent's browser across
+        # threads.  This preserves the same extraction rules while overlapping
+        # slow remote requests from different companies.
+        worker_count = min(settings.ENRICHMENT_CONCURRENCY, len(companies)) if companies else 0
+        if worker_count <= 1:
+            enriched = self._enrich_batch(companies)
+        else:
+            batches = [companies[index::worker_count] for index in range(worker_count)]
+            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="enrichment") as executor:
+                results = list(executor.map(self._enrich_batch_in_isolated_agent, batches))
+            # Restore the search result's original ordering after round-robin
+            # batching, so downstream validation/export behaviour is stable.
+            enriched = [company for offset in range(max(map(len, results))) for batch in results for company in batch[offset:offset + 1]]
 
         found_email = sum(1 for c in enriched if c.email)
         found_address = sum(1 for c in enriched if c.address)
@@ -144,6 +151,25 @@ class EnrichmentAgent(BaseClass):
         print("========== Enrichment Agent Completed ==========")
 
         return enriched
+
+    def _enrich_batch(self, companies: List[Company]) -> List[Company]:
+        """Enrich one worker's companies with one browser lifecycle."""
+        owns_lifecycle = not self._browser.is_running
+        if owns_lifecycle:
+            self._browser.start()
+        try:
+            return [self._enrich(company) for company in companies]
+        finally:
+            if self._linkedin_context is not None:
+                self._linkedin_context.close()
+                self._linkedin_context = None
+            if owns_lifecycle:
+                self._browser.stop()
+
+    @staticmethod
+    def _enrich_batch_in_isolated_agent(companies: List[Company]) -> List[Company]:
+        """Run a batch in a browser that belongs to this worker thread."""
+        return EnrichmentAgent()._enrich_batch(companies)
 
     def _enrich(self, company: Company) -> Company:
 
@@ -170,7 +196,7 @@ class EnrichmentAgent(BaseClass):
             phones.extend(website_phones)
             # GST discovery is evidence based. The original search-result name
             # is never reused once Playwright has identified the official name.
-            if official_name and official_url:
+            if not gst and official_name and official_url:
                 gst_result = self._gst_enrichment.resolve(
                     official_name,
                     official_url,
@@ -186,7 +212,11 @@ class EnrichmentAgent(BaseClass):
             email = email or tofler_email
             address = address or tofler_address
 
-        filesure_data = self._filesure.lookup(cin)
+        filesure_data = (
+            self._filesure.lookup(cin)
+            if cin and (address is None or gst is None or contact_person is None)
+            else None
+        )
         if filesure_data:
             address = address or filesure_data.address
             gst = gst or filesure_data.gst
@@ -195,7 +225,7 @@ class EnrichmentAgent(BaseClass):
 
         # LinkedIn is a last resort: company websites and public registries
         # remain the preferred sources for named contacts.
-        if not contact_person or not designation:
+        if settings.ENRICHMENT_LOOKUP_LINKEDIN and (not contact_person or not designation):
             linkedin_contact, linkedin_designation, linkedin_profile = self._lookup_linkedin_contact(company)
             contact_person = contact_person or linkedin_contact
             designation = designation or linkedin_designation
@@ -203,7 +233,7 @@ class EnrichmentAgent(BaseClass):
 
         # The Jamku turnover lookup is intentionally downstream of GST
         # verification: it never receives a guessed or malformed GSTIN.
-        if gst and not turnover:
+        if settings.ENRICHMENT_LOOKUP_TURNOVER and gst and not turnover:
             slab = self._turnover.lookup(gst)
             if slab:
                 turnover = slab.label
@@ -227,7 +257,11 @@ class EnrichmentAgent(BaseClass):
                 break
 
         city, state, region = parse_address_components(address or company.address)
-        geocoded = self._geocoder.geocode(address or company.address)
+        geocoded = (
+            self._geocoder.geocode(address or company.address)
+            if not (city and state and region)
+            else None
+        )
         if geocoded:
             city = geocoded.city or city
             state = geocoded.state or state
@@ -373,7 +407,8 @@ class EnrichmentAgent(BaseClass):
         """Returns email, address, contact, designation, LinkedIn URL, public GSTIN, CIN, and phone numbers found."""
 
         try:
-            page = self._browser.new_page()
+            context = self._browser.new_context()
+            page = self._browser.new_page(context)
 
             try:
                 self._browser.goto(page, company.website)
@@ -390,7 +425,7 @@ class EnrichmentAgent(BaseClass):
                 contact_person, designation, linkedin_url = self._extract_contact(page)
                 gst = self._extract_gst(page)
                 cin = self._extract_cin(page)
-                pdf_gst = self._extract_gst_from_public_pdfs(page)
+                pdf_gst = self._extract_gst_from_public_pdfs(page) if not gst else None
                 phones = self._extract_phones(page)
 
                 supplemental_urls = self._supplemental_urls(page)
@@ -404,13 +439,15 @@ class EnrichmentAgent(BaseClass):
                     address = address or self._extract_address(page)
                     gst = gst or self._extract_gst(page)
                     cin = cin or self._extract_cin(page)
-                    pdf_gst = pdf_gst or self._extract_gst_from_public_pdfs(page)
+                    pdf_gst = pdf_gst or (self._extract_gst_from_public_pdfs(page) if not gst else None)
                     if contact_person is None:
                         contact_person, designation, linkedin_url = self._extract_contact(page)
                     if len(phones) < 2:
                         phones = list(dict.fromkeys(phones + self._extract_phones(page)))
 
-                    if email and address and contact_person and gst and len(phones) >= 2:
+                    # A named person and GST are uncommon on industrial sites;
+                    # do not make their absence force visits to every link.
+                    if email and address and len(phones) >= 2:
                         break
 
                 gst = gst or pdf_gst
@@ -422,6 +459,7 @@ class EnrichmentAgent(BaseClass):
 
             finally:
                 page.close()
+                context.close()
 
         except Exception as ex:
             logger.warning(
@@ -494,7 +532,8 @@ class EnrichmentAgent(BaseClass):
         """Returns (address, email) from Tofler's free registered-details lookup, or (None, None)."""
 
         try:
-            page = self._browser.new_page()
+            context = self._browser.new_context()
+            page = self._browser.new_page(context)
 
             try:
                 self._browser.goto(page, TOFLER_URL)
@@ -521,6 +560,7 @@ class EnrichmentAgent(BaseClass):
 
             finally:
                 page.close()
+                context.close()
 
         except Exception as ex:
             logger.warning("Tofler lookup failed for '%s': %s", company_name, ex)
@@ -602,7 +642,7 @@ class EnrichmentAgent(BaseClass):
                     ranked.append((0 if any(term in haystack for term in ("gst", "legal", "contact")) else 1, absolute))
             except Exception:
                 continue
-        return list(dict.fromkeys(url for _, url in sorted(ranked)))[:MAX_SUPPLEMENTAL_PAGES]
+        return list(dict.fromkeys(url for _, url in sorted(ranked)))[:settings.ENRICHMENT_MAX_SUPPLEMENTAL_PAGES]
 
     def _extract_email(self, page: Page) -> Optional[str]:
 
