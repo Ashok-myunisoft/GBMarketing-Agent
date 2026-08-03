@@ -1,0 +1,160 @@
+🏠 Home
+📲 API
+🔍 Bulk Search
+⚖️ Tax Notice Management
+GST Details of K.M.P. INDUSTRIES   33AIPPM4067L2ZR   Tamil Nadu
+DETAILS
+
+Trade Name
+
+K.M.P. Industries
+
+Legal Name
+
+Manoharan Kandasamy
+
+Registration Status
+
+Cancelled suo-motoRegular
+
+Cancellation Date
+
+31/05/2025
+
+Registration Date
+
+01/07/2017
+
+Entity Type
+
+Proprietorship
+
+Place of Business (Address)
+
+4, SRI VIGNESH INDUSTRIAL SITE, CHINNAVEDAMPATTI, Coimbatore, Tamil Nadu, 641049
+
+E-Invoice mandatory?
+
+No, Not mandatory
+
+Aggregate Turnover
+
+View Aggregate Turnover
+
+Central Jurisdiction
+
+State - CBIC, Zone - CHENNAI, Commissionerate - COIMBATORE, Division - COIMBATORE - II, Range - COIMBATORE - IIE
+
+State Jurisdiction
+
+State - Tamil Nadu, Division - COIMBATORE, Zone - Coimbatore-III, Circle - ANNUR (Jurisdictional Office)
+
+GSTIN profile last fetched on Sat Dec 06 2025 and GST Returns status last fetched on Sat Jul 18 2026.
+
+RECENT GST RETURNS AS ON SAT JUL 18 2026
+
+The latest GSTR3B was filled for the period September 2024-2025. The latest GSTR3B was filled for the period September 2024-2025.
+
+GSTR1
+FY	Period	Filing Date
+2024-2025	September	16 Oct 2024
+2024-2025	August	17 Sep 2024
+2024-2025	July	16 Aug 2024
+2024-2025	June	16 Jul 2024
+2024-2025	May	17 Jun 2024
+2024-2025	April	13 May 2024
+2023-2024	March	12 Apr 2024
+2023-2024	February	08 Mar 2024
+2023-2024	January	12 Feb 2024
+2023-2024	December	10 Jan 2024
+GSTR3B
+FY	Period	Filing Date
+2024-2025	September	16 Oct 2024
+2024-2025	August	17 Sep 2024
+2024-2025	July	16 Aug 2024
+2024-2025	June	16 Jul 2024
+2024-2025	May	17 Jun 2024
+2024-2025	April	13 May 2024
+2023-2024	March	12 Apr 2024
+2023-2024	February	15 Mar 2024
+2023-2024	January	12 Feb 2024
+2023-2024	December	13 Jan 2024
+FAQs
+
+❔ Legal and Trade name of 33AIPPM4067L2ZR?
+
+💬 Legal name is Manoharan Kandasamy and the Trade Name is K M P Industries.
+
+❔ GST Registration status of 33AIPPM4067L2ZR K M P Industries?
+
+💬 GSTIN status is Cancelled suo-moto and registration type is Regular.
+
+❔ What is the entity type of 33AIPPM4067L2ZR (Manoharan Kandasamy)?
+
+💬 Manoharan Kandasamy legal entity type is Proprietorship.
+
+❔ Place of GST Registration of 33AIPPM4067L2ZR K M P Industries?
+
+💬 The pricipal place of business is 4, SRI VIGNESH INDUSTRIAL SITE, CHINNAVEDAMPATTI, Coimbatore, Tamil Nadu, 641049
+
+❔ What is GST return (GSTR3B) filing frequency for 33AIPPM4067L2ZR?
+
+💬 GST return filing frequency (i.e. periodicity) for financial year 2024 for Q4 is Monthly.
+
+❔ Date of latest GSTR1 filing for 33AIPPM4067L2ZR?
+
+💬 Latest GSTR1 was filed on 16 October 2024 for September of FY 2024-2025.
+
+❔ Date of latest GSTR3B filing for 33AIPPM4067L2ZR?
+
+💬 Latest GSTR3B was filed on 16 October 2024 for September of FY 2024-2025.
+
+🔎
+COMPLIANCE CLASSIFICATION
+Feature in Beta, classifications may be inaccurate.
+Yellow
+Yellow compliance classification indicates that this GSTIN has filed GSTR1, but after the due date.
+HSN / SAC
+
+No HSN/SAC found for this GSTIN.
+
+BUSINESS OWNERS
+Manoharan Kandasamy
+Other GSTIN of the PAN
+
+No other GSTIN found for this PAN
+
+RETURN PERIODICITY
+2024 Q1 M
+2024 Q2 M
+2024 Q3 M
+2024 Q4 M
+BUSINESS ACTIVITIES
+Retail Business
+Wholesale Business
+Factory / Manufacturing
+Similar GSTIN
+Similarity is determined through the use of HSN and Pincode, and the list is refreshed periodically.
+
+No similar GSTIN found
+
+The information on this page is generated using publicly accessible data and machine learning models. We make regular updates to this content; however, we do not assume responsibility for ensuring its ongoing accuracy. Please be aware that we do not entertain takedown requests. If you believe the information is incorrect, please contact the GST Department for assistance.
+
+If you have suggestions on improving this page, please send an email detailing the change/s you would like to see. The email is mentioned at the bottom of this page.
+
+OUR PRODUCTS
+Jamku Practice Management Software
+
+Office Management Software for CA, CS, Tax consultants, Advocates. Task management, client profile, billing, geo-location based attendance, out-of-pocket expense, client portal, file management, DSC expiry.
+
+Jamku Portal
+
+Automated notice, proceedings, demand status, return filing tracking compliance software. It fetches all the information from Income Tax, GST, TDS (Traces) website, and provides insightful actionable dashboards.
+
+Read Income Tax Bill 2025
+
+© 2018–2026 Madrecha Solutions Pvt Ltd.   |   Contact 📧: adarsh[at]madrecha[dot]com
+
+Disclaimer
+
+The contents of the website is provided "as is", without warranty of any kind, express or Implied, including but not limited to the warranties of merchantability, Fitness for a particular purpose and noninfringement. In no event shall the authors or contributors or copyright holders or sponsorers be liable for any claim, damages or other Liability, whether in an action of contract, tort or otherwise, arising from, Out of or in connection with the website or the use or other dealings in the website.

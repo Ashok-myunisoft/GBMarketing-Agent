@@ -1,12 +1,14 @@
 import type { Job, JobEvent } from "./types";
 
-const API_BASE = "http://217.217.249.121:8040";
+export type ExistingDataFile = { name: string; size: number; updated_at: number };
+
+const API_BASE = "http://127.0.0.1:8040";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
-      "Content-Type": "application/json",
+      ...(options?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...(options?.headers || {}),
     },
   });
@@ -24,6 +26,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(message);
   }
 
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -44,6 +47,20 @@ export function getJobs() {
 
 export function getJobEvents(id: string) {
   return request<JobEvent[]>(`/jobs/${id}/events`);
+}
+
+export function getExistingData() {
+  return request<ExistingDataFile[]>("/existing-data");
+}
+
+export function uploadExistingData(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return request<ExistingDataFile>("/existing-data", { method: "POST", body: form });
+}
+
+export function deleteExistingData(filename: string) {
+  return request<void>(`/existing-data/${encodeURIComponent(filename)}`, { method: "DELETE" });
 }
 
 export const exportUrl = (jobId: string) =>

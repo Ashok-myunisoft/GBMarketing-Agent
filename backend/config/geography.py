@@ -31,8 +31,15 @@ def matches_requested_city(city: Optional[str], address: Optional[str], requeste
     if requested_canonical:
         return actual_canonical == requested_canonical
     normalized_requested = re.sub(r"[^a-z0-9]", "", (requested or "").lower())
-    normalized_city = re.sub(r"[^a-z0-9]", "", (city or "").lower())
-    return bool(normalized_requested and normalized_city == normalized_requested)
+    if not normalized_requested:
+        return False
+    # Outside the curated alias list there is no canonical form to compare, so
+    # fall back to a substring check - and check address too, since several
+    # providers only ever populate address, never a clean city field.
+    return any(
+        normalized_requested in re.sub(r"[^a-z0-9]", "", (candidate or "").lower())
+        for candidate in (city, address)
+    )
 
 
 def parse_address_components(address: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:

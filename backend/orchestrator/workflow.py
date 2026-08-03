@@ -105,6 +105,7 @@ class WorkflowOrchestrator:
             context.companies,
             existing_excel_path=context.existing_excel_path,
             requested_location=context.location,
+            requested_industry=context.industry,
         )
         return context
 

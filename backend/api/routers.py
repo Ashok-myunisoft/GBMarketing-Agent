@@ -1,15 +1,17 @@
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from schemas.request import ChatRequest
 from agents.conversation_agent import ConversationAgent
 from services.llm_services import LLMTemporarilyUnavailableError
 from services.job_service import JobService
+from services.existing_data_service import ExistingDataService
 
 router = APIRouter()
 job_service = JobService()
+existing_data_service = ExistingDataService()
 
 @router.post("/Ask")
 def chat(request: ChatRequest):
@@ -112,3 +114,20 @@ def download_export(job_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=path.name,
     )
+
+
+@router.get("/existing-data")
+def list_existing_data():
+    """Show the files that ValidationAgent already uses for deduplication."""
+    return existing_data_service.list_files()
+
+
+@router.post("/existing-data", status_code=201)
+async def upload_existing_data(file: UploadFile = File(...)):
+    """Add a deduplication baseline file without altering workflow behaviour."""
+    return await existing_data_service.upload(file)
+
+
+@router.delete("/existing-data/{filename}", status_code=204)
+def delete_existing_data(filename: str):
+    existing_data_service.delete(filename)

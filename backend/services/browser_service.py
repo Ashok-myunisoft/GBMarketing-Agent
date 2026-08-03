@@ -15,6 +15,16 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_CONTEXT_OPTIONS = {
+    "user_agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "locale": "en-IN",
+    "timezone_id": "Asia/Kolkata",
+    "viewport": {"width": 1366, "height": 768},
+}
+
 
 class BrowserService:
     """
@@ -80,12 +90,23 @@ class BrowserService:
         self.stop()
 
     def new_context(self, **kwargs) -> BrowserContext:
-        """Create an isolated browser context (own cookies/storage)."""
+        """Create an isolated browser context (own cookies/storage).
+
+        Playwright's unmodified defaults advertise themselves as automation -
+        the User-Agent literally contains "HeadlessChrome", and the locale
+        defaults to en-GB regardless of machine settings. Sites that branch
+        on either (Google's search results among them) are more likely to
+        answer those defaults with a bot challenge than they are a
+        real-looking desktop Chrome on an Indian locale, which is what every
+        site this app visits is actually being browsed for. Callers can still
+        override any of these via kwargs.
+        """
 
         if not self.is_running:
             raise RuntimeError("BrowserService.start() must be called before new_context()")
 
-        return self._browser.new_context(**kwargs)
+        options = {**DEFAULT_CONTEXT_OPTIONS, **kwargs}
+        return self._browser.new_context(**options)
 
     def new_page(self, context: Optional[BrowserContext] = None) -> Page:
         """Create a page inside the given context, or a fresh context if none is passed."""

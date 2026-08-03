@@ -10,14 +10,14 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 MASTER_EXPORT_PATH = BACKEND_DIR / "exports" / "All_Extracted_Leads.xlsx"
 
 EXPORT_COLUMNS = [
-    ("Company Name", "company_name"), ("GST", "gst"), ("GST Confidence", "gst_confidence"),
-    ("GST Sources", "gst_sources"), ("Turn Over", "turnover"),
+    ("Company Name", "company_name"), ("GST", "gst"), ("Turn Over", "turnover"),
     ("Region", "region"), ("City", "city"), ("Industry Type", "industry"),
     ("Contact Person", "contact_person"), ("Designation", "designation"),
     ("Mobile Number", "phone"), ("Alternate Mobile Number", "phone_alt"),
     ("Email ID", "email"), ("LinkedIN Id", "linkedin_url"),
     ("Website URL", "website"), ("Remarks", "remarks"), ("Followup", "followup"),
 ]
+LEGACY_GST_HEADERS = {"GST Confidence", "GST Sources"}
 
 class ExportAgent(BaseClass):
     def execute(self, companies: list[Company], output_path: Optional[str] = None) -> str:
@@ -35,15 +35,14 @@ class ExportAgent(BaseClass):
             workbook = load_workbook(path)
             sheet = workbook["Leads"] if "Leads" in workbook.sheetnames else workbook.active
             existing_headers = [cell.value for cell in sheet[1]]
-            legacy_headers = [header for header, _ in EXPORT_COLUMNS if header not in {"GST Confidence", "GST Sources"}]
-            if existing_headers == legacy_headers:
-                sheet.insert_cols(3, amount=2)
-                sheet.cell(1, 3, "GST Confidence")
-                sheet.cell(1, 4, "GST Sources")
-                for cell in sheet[1]:
-                    cell.font = Font(bold=True)
-            elif existing_headers != headers:
-                raise ValueError(f"Master export has unexpected headers: {path}")
+            if existing_headers != headers:
+                legacy_columns = [i for i, header in enumerate(existing_headers, start=1) if header in LEGACY_GST_HEADERS]
+                remaining_headers = [header for header in existing_headers if header not in LEGACY_GST_HEADERS]
+                if legacy_columns and remaining_headers == headers:
+                    for column_index in sorted(legacy_columns, reverse=True):
+                        sheet.delete_cols(column_index)
+                else:
+                    raise ValueError(f"Master export has unexpected headers: {path}")
         else:
             workbook = Workbook()
             sheet = workbook.active

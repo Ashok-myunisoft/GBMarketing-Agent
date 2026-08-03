@@ -37,9 +37,13 @@ class SearchService:
             for provider in self.providers:
                 try:
                     print(f"\nExecuting Provider : {provider.__class__.__name__} ({industry})")
+                    # `company.industry` is left exactly as the provider
+                    # observed it (or None) - never overwritten with the
+                    # taxonomy term used to build this query. Stamping the
+                    # search term here would make ValidationAgent's industry
+                    # check tautological: it would always match itself,
+                    # regardless of what the company's real business is.
                     companies = provider.search(query_request)
-                    for company in companies:
-                        company.industry = company.industry or industry
                     print(f"Found {len(companies)} companies")
                     all_companies.extend(companies)
                 except Exception as ex:

@@ -30,6 +30,7 @@ class ValidationAgent(BaseClass):
         *,
         existing_excel_path: Optional[str] = None,
         requested_location: Optional[str] = None,
+        requested_industry: Optional[str] = None,
     ) -> list[Company]:
         source = Path(existing_excel_path) if existing_excel_path else DEFAULT_EXISTING_DATA_DIR
         existing_keys = self._load_existing_keys(source)
@@ -54,7 +55,7 @@ class ValidationAgent(BaseClass):
                 if not matches_requested_city(company.city, company.address, requested_location):
                     continue
 
-            notes = self._validation_notes(company)
+            notes = self._validation_notes(company, requested_industry)
             rejected = any(note.startswith("rejected:") for note in notes)
             status = "rejected" if rejected else ("validated" if not notes else "unverified")
             if not rejected:
@@ -66,11 +67,27 @@ class ValidationAgent(BaseClass):
 
         return kept
 
-    def _validation_notes(self, company: Company) -> list[str]:
+    def _validation_notes(self, company: Company, requested_industry: Optional[str] = None) -> list[str]:
         notes: list[str] = []
         if company.industry:
-            if not match_target_industry(company.industry):
-                notes.append("rejected: declared industry is outside target taxonomy")
+            matched = match_target_industry(company.industry)
+            if not matched:
+                # A category that doesn't map onto our taxonomy (e.g. a
+                # generic Maps label like "Manufacturer") isn't evidence the
+                # company is out of scope, only that the label wasn't
+                # specific enough to check - so this stays unverified, not
+                # rejected.
+                notes.append("unverified: declared industry could not be matched to a target segment")
+            else:
+                requested_matched = match_target_industry(requested_industry) if requested_industry else None
+                # Only enforced when the user asked for one specific segment
+                # (e.g. "Pump"). A blank/generic ("Manufacturing") request is
+                # an intentionally broad search across the whole taxonomy,
+                # so any recognised target industry is a legitimate match.
+                if requested_matched and requested_matched != "Manufacturing" and matched != requested_matched:
+                    notes.append(
+                        f"rejected: declared industry '{matched}' does not match requested '{requested_matched}'"
+                    )
         else:
             notes.append("unverified: industry not supplied")
 

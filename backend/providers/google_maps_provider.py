@@ -173,15 +173,22 @@ class GoogleMapsProvider(BaseProvider):
     def _parse_card(self, card: Locator) -> Company:
 
         name = card.locator(NAME_SELECTOR).first.inner_text().strip()
+        category, address = self._extract_category_and_address(card)
 
         return Company(
             company_name=name,
             website=self._extract_website(card),
             phone=self._extract_phone(card),
             email=None,
-            address=self._extract_address(card),
+            address=address,
             city=None,
             state=None,
+            # The category Maps assigns each listing (e.g. "Pump supplier")
+            # is the only real, observed per-company industry signal any
+            # provider exposes - unlike the search term used to find it, this
+            # actually reflects what the business is, so ValidationAgent can
+            # check it for real instead of rubber-stamping the query itself.
+            industry=category,
         )
 
     def _extract_website(self, card: Locator) -> Optional[str]:
@@ -209,13 +216,14 @@ class GoogleMapsProvider(BaseProvider):
 
         return phone_span.first.inner_text().strip()
 
-    def _extract_address(self, card: Locator) -> Optional[str]:
+    def _extract_category_and_address(self, card: Locator) -> "tuple[Optional[str], Optional[str]]":
         """
         Maps renders this as a "category · address" line, but sometimes
         splices in an extra icon glyph as its own invisible segment
         (e.g. "Wholesaler ·  · 42 Main St"). Segments are filtered down
         to ones with actual alphanumeric content before picking the
-        last one as the address, rather than trusting a fixed position.
+        first as the category and the last as the address, rather than
+        trusting a fixed position.
 
         The combined preview blob (category+address+hours+phone as one
         multi-line string) and the standalone "Open · Closes 8pm ·
@@ -244,6 +252,6 @@ class GoogleMapsProvider(BaseProvider):
             if segments[0].lower().startswith(HOURS_LINE_PREFIXES):
                 continue
 
-            return segments[-1]
+            return segments[0], segments[-1]
 
-        return None
+        return None, None

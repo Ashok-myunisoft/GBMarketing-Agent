@@ -2,6 +2,7 @@ from agents.base_agent import BaseClass
 from orchestrator.workflow import WorkflowOrchestrator
 from orchestrator.workflow_registry import WORKFLOWS
 from config.targeting import match_target_industry
+from config.geography import canonical_city
 from models.workflow_context import WorkflowContext
 from schemas.query_understanding import QueryUnderstanding
 
@@ -39,13 +40,20 @@ class PlannerAgent(BaseClass):
         # search when the user asked for a known target segment such as Valve.
         industry = match_target_industry(user_query) or industry
 
+        # Same reasoning as industry above: a location named in the original
+        # request is more reliable than a blank/incorrect LLM field. Without
+        # this, a missed location silently disables ValidationAgent's entire
+        # city filter, letting every location through unfiltered.
+        location = self._optional_value(understanding.location)
+        location = canonical_city(user_query) or location
+
         # Build the workflow context
         context = WorkflowContext(
             user_query=user_query,
             intent=self._optional_value(understanding.intent),
             workflow=workflow,
             industry=industry,
-            location=self._optional_value(understanding.location),
+            location=location,
             buyer_persona=self._optional_value(understanding.buyer_persona),
             confidence=understanding.confidence,
         )

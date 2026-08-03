@@ -106,7 +106,7 @@ class EnrichmentAgent(BaseClass):
         )
         self._geocoder = geocoder or GeoapifyGeocodingService()
         self._filesure = filesure or FileSureService()
-        self._turnover = turnover or GstTurnoverService()
+        self._turnover = turnover or GstTurnoverService(self._browser)
         self._gst_enrichment = GstEnrichmentService(self._browser)
         self._linkedin_context: Optional[BrowserContext] = None
         self._linkedin_authenticated = False
@@ -180,8 +180,6 @@ class EnrichmentAgent(BaseClass):
         linkedin_url = None
         phones: list[str] = []
         gst = company.gst
-        gst_confidence = company.gst_confidence
-        gst_sources = company.gst_sources
         cin = company.cin
         turnover = company.turnover
         official_name: Optional[str] = None
@@ -190,22 +188,16 @@ class EnrichmentAgent(BaseClass):
         if company.website and company.website.startswith("http"):
             (
                 email, address, contact_person, designation, linkedin_url,
-                _website_gst, website_cin, website_phones, official_name, official_url, official_text,
+                website_gst, website_cin, website_phones, official_name, official_url,
             ) = self._enrich_from_website(company)
             cin = cin or website_cin
+            gst = gst or website_gst
             phones.extend(website_phones)
-            # GST discovery is evidence based. The original search-result name
-            # is never reused once Playwright has identified the official name.
-            if not gst and official_name and official_url:
-                gst_result = self._gst_enrichment.resolve(
-                    official_name,
-                    official_url,
-                    address or company.address,
-                    known_pages=[(official_url, official_text)],
-                )
-                gst = gst_result.gst_number
-                gst_confidence = gst_result.confidence if gst else None
-                gst_sources = gst_result.source
+
+        # A GSTIN published on the company's own site is used as-is; only
+        # when it isn't do we fall back to the Google search + jamku flow.
+        if not gst:
+            gst = self._gst_enrichment.resolve(official_name or company.company_name)
 
         if email is None or address is None:
             tofler_address, tofler_email = self._lookup_tofler(official_name or company.company_name)
@@ -231,12 +223,10 @@ class EnrichmentAgent(BaseClass):
             designation = designation or linkedin_designation
             linkedin_url = linkedin_url or linkedin_profile
 
-        # The Jamku turnover lookup is intentionally downstream of GST
-        # verification: it never receives a guessed or malformed GSTIN.
+        # The jamku turnover lookup is intentionally downstream of GST
+        # resolution: it never receives a guessed or malformed GSTIN.
         if settings.ENRICHMENT_LOOKUP_TURNOVER and gst and not turnover:
-            slab = self._turnover.lookup(gst)
-            if slab:
-                turnover = slab.label
+            turnover = self._turnover.lookup(gst)
 
         # Merge website-discovered numbers with the one Maps/directory
         # search already found, keeping order and dropping duplicates,
@@ -285,8 +275,6 @@ class EnrichmentAgent(BaseClass):
                 "phone": phone,
                 "phone_alt": phone_alt,
                 "gst": gst,
-                "gst_confidence": gst_confidence,
-                "gst_sources": gst_sources,
                 "cin": cin,
                 "turnover": turnover,
                 "city": city or company.city,
@@ -403,7 +391,7 @@ class EnrichmentAgent(BaseClass):
 
     def _enrich_from_website(
         self, company: Company
-    ) -> "tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], list[str], Optional[str], Optional[str], str]":
+    ) -> "tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], list[str], Optional[str], Optional[str]]":
         """Returns email, address, contact, designation, LinkedIn URL, public GSTIN, CIN, and phone numbers found."""
 
         try:
@@ -416,10 +404,6 @@ class EnrichmentAgent(BaseClass):
 
                 official_name = self._extract_official_company_name(page)
                 official_url = page.url
-                try:
-                    official_text = page.locator("body").inner_text(timeout=5000)
-                except Exception:
-                    official_text = ""
                 email = self._extract_email(page)
                 address = self._extract_address(page)
                 contact_person, designation, linkedin_url = self._extract_contact(page)
@@ -454,7 +438,7 @@ class EnrichmentAgent(BaseClass):
 
                 return (
                     email, address, contact_person, designation, linkedin_url, gst, cin, phones,
-                    official_name, official_url, official_text,
+                    official_name, official_url,
                 )
 
             finally:
@@ -468,21 +452,30 @@ class EnrichmentAgent(BaseClass):
                 company.website,
                 ex,
             )
-            return None, None, None, None, None, None, None, [], None, None, ""
+            return None, None, None, None, None, None, None, [], None, None
 
     @staticmethod
     def _extract_official_company_name(page: Page) -> Optional[str]:
         """Prefer legal/organisation metadata exposed by the official site."""
         try:
+            candidates: list[tuple[int, str]] = []
             structured = page.locator('script[type="application/ld+json"]')
             for index in range(structured.count()):
                 raw = structured.nth(index).inner_text(timeout=1000)
                 try:
-                    legal_name = EnrichmentAgent._organisation_name_from_jsonld(json.loads(raw))
-                    if legal_name:
-                        return legal_name
+                    EnrichmentAgent._collect_jsonld_names(json.loads(raw), candidates)
                 except (TypeError, ValueError):
                     continue
+            if candidates:
+                # Pages like a marketplace seller-profile commonly carry both
+                # the marketplace's own sitewide Organization schema *and* a
+                # LocalBusiness schema for the specific seller - picking
+                # whichever JSON-LD block merely comes first on the page
+                # would silently return the marketplace's own name instead
+                # of the company's. Highest specificity wins regardless of
+                # position; ties keep first-seen order (stable sort).
+                candidates.sort(key=lambda item: item[0], reverse=True)
+                return candidates[0][1]
             for selector in ('meta[property="og:site_name"]', 'meta[name="application-name"]'):
                 value = page.locator(selector).first.get_attribute("content")
                 if value and EnrichmentAgent._looks_like_company_name(value):
@@ -494,31 +487,36 @@ class EnrichmentAgent(BaseClass):
             pass
         return None
 
+    # Higher specificity wins when a page carries more than one JSON-LD
+    # name candidate. An explicit legalName is the most authoritative
+    # source there is; a bare "Organization" node is often sitewide
+    # publisher/platform boilerplate rather than the entity the page is
+    # actually about, so it ranks below the more specific business types.
+    _JSONLD_TYPE_SPECIFICITY = {"organization": 0, "corporation": 1, "localbusiness": 2}
+    _JSONLD_LEGAL_NAME_RANK = 3
+
     @staticmethod
-    def _organisation_name_from_jsonld(value) -> Optional[str]:
-        """Get a legal/Organisation name without mistaking a product for one."""
+    def _collect_jsonld_names(value, candidates: "list[tuple[int, str]]") -> None:
+        """Appends every (specificity, name) candidate found, without mistaking a product for one."""
         if isinstance(value, list):
             for item in value:
-                name = EnrichmentAgent._organisation_name_from_jsonld(item)
-                if name:
-                    return name
-            return None
+                EnrichmentAgent._collect_jsonld_names(item, candidates)
+            return
         if not isinstance(value, dict):
-            return None
+            return
         legal_name = value.get("legalName")
         if isinstance(legal_name, str) and EnrichmentAgent._looks_like_company_name(legal_name):
-            return re.sub(r"\s+", " ", legal_name).strip()
+            candidates.append((EnrichmentAgent._JSONLD_LEGAL_NAME_RANK, re.sub(r"\s+", " ", legal_name).strip()))
         kind = value.get("@type", "")
         kinds = {kind.lower()} if isinstance(kind, str) else {str(item).lower() for item in kind}
+        matched_kinds = EnrichmentAgent._JSONLD_TYPE_SPECIFICITY.keys() & kinds
         name = value.get("name")
-        if (
-            {"organization", "localbusiness", "corporation"} & kinds
-            and isinstance(name, str)
-            and EnrichmentAgent._looks_like_company_name(name)
-        ):
-            return re.sub(r"\s+", " ", name).strip()
+        if matched_kinds and isinstance(name, str) and EnrichmentAgent._looks_like_company_name(name):
+            specificity = max(EnrichmentAgent._JSONLD_TYPE_SPECIFICITY[kind] for kind in matched_kinds)
+            candidates.append((specificity, re.sub(r"\s+", " ", name).strip()))
         graph = value.get("@graph")
-        return EnrichmentAgent._organisation_name_from_jsonld(graph) if graph else None
+        if graph:
+            EnrichmentAgent._collect_jsonld_names(graph, candidates)
 
     @staticmethod
     def _looks_like_company_name(value: str) -> bool:

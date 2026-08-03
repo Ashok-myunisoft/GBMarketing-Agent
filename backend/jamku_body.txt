@@ -1,0 +1,70 @@
+🏠 Home
+📲 API
+🔍 Bulk Search
+⚖️ Tax Notice Management
+Search GST Return Filing Status
+🔎
+Objective - Why we created this?
+Ease of use
+
+Provide super easy to use API (Free) to access the Data pertaining to GSTIN profile (aka Goods and Services Tax Number) like - Trade Name, GSTIN Registration Status, GST Return filing date, Compliance classifation, Filling periodicity.
+
+Along with API, we also have this webiste which shows the data from the API in a nicely formatted tables.
+
+Ease of Compliance
+
+Since this information will be available programatically, it opens up new avenues to build solutions which helps businesses and Tax Practitioner.
+
+The details are also available on the GST Portal, but you need to enter captcha to get details. Thus, using this, Tax Payers and Tax Practitioner will be saving their precious time and effort.
+
+Additional Data
+
+GST Website does not provide certain information about GSTIN without login like Aggregate Turnover. Here, we provide these information for public at large, without the need for any login.
+
+We calculate "GSTIN Classification" based on GSTR1 filling. This is used by many small and large business to
+
+Catching Layer
+
+The GSP & ASP provide direct access to the GST portal, which increases the load on the already burdened GST portal. We provide 5 day catching of return filing data and 30 day catching of GSTIN status to make things faster for all. This reduces server load of GST Portal.
+
+Free Access
+
+When we started this project (back in late 2018), there was no freely available API to get GST return filing status or GST profile details on the basis of GSTIN. While the GST return details and other information is (& was) available to GST Suvidha Providers (aka GSPs) and ASPs, it is available on a charegeable basis. This project aims to provide free (for fair usage) API for all. Get Started with API .
+
+GSTIN Compliance Classification System
+
+Input tax credit (ITC) is only available if your vendor files his GSTR1. It is imerative to track the GST return filing compliance of the vendor. However, if you start tracking just the GSTR1 filing dates, it can be quite combursome and time consuming. Hence we came up with simple and easy to comprehend "GSTIN Compliance Classification System". In this classification, we classify all the GSTIN into these 5 classes.
+
+Green
+this GSTIN has filled last 4 GSTR1 on or before due date.
+Yellow
+this GSTIN has filed GSTR1, but after the due date.
+Red
+this GSTIN has not yet filed last 2 GSTR1.
+Orange
+this GSTIN is either deactivated/cancelled or is registred as Composition.
+Black
+we cannot determine classification at the moment. This is most likely due to lack of data availability.
+
+The idea is to provide businesses with simple classification system which is reasy to understand for the user who is punching in Purchase Order or is involved with Vendor selection. Example: If your vendor's GSTIN compliance classification is "Red", search for alternate vendor or purchase department takes approval from purchase head for purchasing from the vendor. In case of "Yellow", you can followup with vendor for filing the return on time. These examples are just tip of the ice-burg; this classification system can be used as an early warning system for GST ITC credit.
+
+Disclaimer
+
+We have NO affiliation with GST Portal (gst.gov.in) The information is provided on best effort basis.
+
+OUR PRODUCTS
+Jamku Practice Management Software
+
+Office Management Software for CA, CS, Tax consultants, Advocates. Task management, client profile, billing, geo-location based attendance, out-of-pocket expense, client portal, file management, DSC expiry.
+
+Jamku Portal
+
+Automated notice, proceedings, demand status, return filing tracking compliance software. It fetches all the information from Income Tax, GST, TDS (Traces) website, and provides insightful actionable dashboards.
+
+Read Income Tax Bill 2025
+
+© 2018–2026 Madrecha Solutions Pvt Ltd.   |   Contact 📧: adarsh[at]madrecha[dot]com
+
+Disclaimer
+
+The contents of the website is provided "as is", without warranty of any kind, express or Implied, including but not limited to the warranties of merchantability, Fitness for a particular purpose and noninfringement. In no event shall the authors or contributors or copyright holders or sponsorers be liable for any claim, damages or other Liability, whether in an action of contract, tort or otherwise, arising from, Out of or in connection with the website or the use or other dealings in the website.

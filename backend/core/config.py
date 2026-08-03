@@ -23,7 +23,6 @@ class Settings:
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY")
     FILESURE_API_KEY = os.getenv("FILESURE_API_KEY") or os.getenv("FILE_SURE_API_KEY")
-    RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
     # Optional credentials for the LinkedIn contact-enrichment fallback.
     # Keep these in the environment; never add them to source control.
     LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL")
@@ -40,11 +39,12 @@ class Settings:
     ENRICHMENT_PLAYWRIGHT_TIMEOUT_MS = max(
         1_000, int(os.getenv("ENRICHMENT_PLAYWRIGHT_TIMEOUT_MS", "15000"))
     )
-    # These two sources are both comparatively slow and have low coverage for
-    # the industrial-company searches this app targets.  They remain available
-    # as explicit opt-ins for a deep-enrichment run.
+    # LinkedIn is comparatively slow and has low coverage for the
+    # industrial-company searches this app targets, so it stays an explicit
+    # opt-in for a deep-enrichment run. GST + turnover extraction (Google
+    # search -> jamku.app) is core to every run, so it defaults on.
     ENRICHMENT_LOOKUP_LINKEDIN = os.getenv("ENRICHMENT_LOOKUP_LINKEDIN", "false").lower() == "true"
-    ENRICHMENT_LOOKUP_TURNOVER = os.getenv("ENRICHMENT_LOOKUP_TURNOVER", "false").lower() == "true"
+    ENRICHMENT_LOOKUP_TURNOVER = os.getenv("ENRICHMENT_LOOKUP_TURNOVER", "true").lower() == "true"
 
 
 settings = Settings()
