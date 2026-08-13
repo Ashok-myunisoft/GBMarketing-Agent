@@ -1,57 +1,64 @@
 import json
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
+from contextlib import contextmanager
 from typing import List, Optional
 from urllib.parse import quote_plus, urljoin, urlparse
-from urllib.request import Request, urlopen
 
 from playwright.sync_api import BrowserContext, Page
 
 from agents.base_agent import BaseClass
 from config.geography import parse_address_components
-from config.targeting import TARGET_DESIGNATIONS, extract_target_designation
 from core.config import settings
 from schemas.company import Company
 from services.browser_service import BrowserService
+from services.contact_extraction.designation_rules import canonical_designation
+from services.contact_extraction.name_rules import is_person_name, normalize_name
+from services.contact_extraction.page_classifier import classify as classify_page
+from services.contact_extraction.pipeline import ContactExtractionPipeline
 from services.geocoding_service import GeoapifyGeocodingService
 from services.filesure_service import FileSureService
 from services.gst_turnover_service import GstTurnoverService
-from services.gst_enrichment_service import GstEnrichmentService
+from services.gst_turnover_enrichment.service import GstTurnoverEnrichmentService
+from services.gst_turnover_enrichment.firecrawl_client import FirecrawlClient
+from services.gst_turnover_enrichment.gst_extraction import find_valid_gstin
+from services.enrichment.company_enrichment import CompanyTavilyEnrichmentService
 
 logger = logging.getLogger(__name__)
 
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 PHONE_PATTERN = re.compile(r"(?:\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}\b")
-GSTIN_PATTERN = re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b", re.IGNORECASE)
 CIN_PATTERN = re.compile(r"\b[LU]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}\b", re.IGNORECASE)
 PINCODE_PATTERN = re.compile(r"\b\d{6}\b")
 ADDRESS_HINT_WORDS = (
     "road", "street", "nagar", "estate", "industrial", "layout", "floor",
     "building", "complex", "colony", "phase", "block", "marg", "sector",
 )
+@contextmanager
+def _timed(company_name: str, stage: str):
+    """Logs how long one enrichment stage took for one company, at INFO
+    level, so a slow run can be diagnosed from logs alone (which stage is
+    actually eating the time: browser I/O vs LLM calls vs a specific
+    third-party lookup) without attaching a profiler."""
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = time.monotonic() - start
+        logger.info("[PERF] %s: %d ms company=%s", stage, round(elapsed * 1000), company_name)
+
+
 CONTACT_LINK_TEXT = "Contact"
 CONTACT_PAGE_LINK_TEXT = (
     "contact", "about", "team", "management", "leadership", "legal",
     "privacy", "terms", "gst", "company-info",
 )
-MAX_PDF_BYTES = 5 * 1024 * 1024
-GSTIN_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 TOFLER_URL = "https://www.tofler.in/"
 TOFLER_SEARCH_INPUT = 'input[placeholder="Search company, CIN OR DIN"]'
 LINKEDIN_LOGIN_URL = "https://www.linkedin.com/login"
 LINKEDIN_PEOPLE_SEARCH_URL = "https://www.linkedin.com/search/results/people/?keywords="
-NAME_EXCLUDE_WORDS = {
-    "pvt", "ltd", "limited", "private", "industries", "enterprises", "company",
-    "corporation", "llp", "inc", "solutions", "technologies", "email", "phone",
-    "contact", "address", "products", "services", "engineers", "engineering",
-    "about", "us", "home", "careers", "our", "more", "read", "learn", "view",
-    "get", "india", "private", "manufacturing", "coimbatore",
-    "who", "are", "automation", "valves", "butterfly", "online", "retail",
-    "channel", "customer", "centric", "approach", "major", "market", "bengaluru",
-    "karnataka", "tamil", "nadu",
-}
 
 
 class EnrichmentAgent(BaseClass):
@@ -96,6 +103,8 @@ class EnrichmentAgent(BaseClass):
         geocoder: Optional[GeoapifyGeocodingService] = None,
         filesure: Optional[FileSureService] = None,
         turnover: Optional[GstTurnoverService] = None,
+        tavily_enrichment: Optional[CompanyTavilyEnrichmentService] = None,
+        firecrawl: Optional[FirecrawlClient] = None,
     ):
         # Enrichment is best-effort: a single unresponsive company site must
         # not hold up an entire batch for the browser's general 30-second
@@ -106,11 +115,27 @@ class EnrichmentAgent(BaseClass):
         )
         self._geocoder = geocoder or GeoapifyGeocodingService()
         self._filesure = filesure or FileSureService()
-        self._turnover = turnover or GstTurnoverService(self._browser)
-        self._gst_enrichment = GstEnrichmentService(self._browser)
+        # Retain the historical injection point without constructing legacy
+        # search services. Production resolution is self._gst_turnover.
+        self._turnover = turnover
+        # Plain HTTPS API, no Playwright involved - the sole content-fetch
+        # mechanism for GST/turnover (see services/gst_turnover_enrichment).
+        self._firecrawl = firecrawl or FirecrawlClient()
+        self._gst_turnover = GstTurnoverEnrichmentService(self._browser, self._firecrawl)
+        # Tavily search + HTML/PDF crawl + LLM structured extraction (see
+        # services/enrichment/company_enrichment.py). A no-op whenever
+        # TAVILY_API_KEY isn't configured, so this is safe to always
+        # construct - existing behaviour is unchanged until a key is set.
+        self._tavily = tavily_enrichment or CompanyTavilyEnrichmentService(self._browser)
         self._linkedin_context: Optional[BrowserContext] = None
         self._linkedin_authenticated = False
         self._linkedin_unavailable = False
+        # Small dedicated pool for the FileSure prefetch (plain HTTPS calls,
+        # no Playwright involved) - separate from the per-company worker
+        # pool in execute() so it doesn't compete with those for slots.
+        self._filesure_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="filesure-prefetch"
+        )
 
     def execute(self, companies: List[Company]) -> List[Company]:
 
@@ -163,6 +188,9 @@ class EnrichmentAgent(BaseClass):
             if self._linkedin_context is not None:
                 self._linkedin_context.close()
                 self._linkedin_context = None
+            if self._turnover is not None:
+                self._turnover.close()
+            self._filesure_executor.shutdown(wait=False, cancel_futures=True)
             if owns_lifecycle:
                 self._browser.stop()
 
@@ -172,61 +200,166 @@ class EnrichmentAgent(BaseClass):
         return EnrichmentAgent()._enrich_batch(companies)
 
     def _enrich(self, company: Company) -> Company:
+        """Measure the complete job even when a best-effort source fails."""
+        started = time.monotonic()
+        try:
+            try:
+                return self._enrich_impl(company)
+            except Exception:
+                # Every individual source (website, Tofler, LinkedIn, GST/turnover,
+                # LLM extraction) already degrades gracefully on its own failure -
+                # this is the backstop for anything else (a schema edge case, an
+                # unhandled library exception) that would otherwise abort this
+                # worker's entire remaining batch instead of just this company.
+                logger.exception(
+                    "Unhandled enrichment failure for '%s' - keeping company unchanged",
+                    company.company_name,
+                )
+                return company
+        finally:
+            logger.info(
+                "[PERF] total enrichment: %d ms company=%s",
+                round((time.monotonic() - started) * 1000), company.company_name,
+            )
+
+    def _enrich_impl(self, company: Company) -> Company:
 
         email = None
         address = None
-        contact_person = None
-        designation = None
-        linkedin_url = None
+        contact_candidates: list = []
         phones: list[str] = []
-        gst = company.gst
         cin = company.cin
-        turnover = company.turnover
         official_name: Optional[str] = None
         official_url: Optional[str] = None
 
+        contact_pipeline = ContactExtractionPipeline(company.company_name, company.website)
+
+        # FileSure is a plain HTTPS call (no Playwright involved), so when a
+        # CIN is already present on the input record it can run on a
+        # background thread for the several-second duration of the browser-
+        # bound Tavily/website work below instead of waiting until after it.
+        # Only usable when the CIN is already known here - a CIN discovered
+        # later, during the website crawl, still has to wait and is looked
+        # up synchronously further down as before.
+        filesure_future = None
+        if cin:
+            filesure_future = self._filesure_executor.submit(self._filesure.lookup, cin)
+
+        # Tavily search + HTML/PDF crawl + one LLM structured-extraction call
+        # (see services/enrichment/company_enrichment.py). A no-op returning
+        # an empty result whenever TAVILY_API_KEY isn't configured. Its
+        # output is never applied directly - it only feeds candidates into
+        # the same GST/turnover/contact scoring machinery below, and fills
+        # whatever the website crawl/Tofler/FileSure fallbacks still miss.
+        with _timed(company.company_name, "tavily.gather"):
+            tavily_result = self._tavily.gather(company.company_name, company.website)
+
         if company.website and company.website.startswith("http"):
-            (
-                email, address, contact_person, designation, linkedin_url,
-                website_gst, website_cin, website_phones, official_name, official_url,
-            ) = self._enrich_from_website(company)
+            with _timed(company.company_name, "website crawl (email/address/contact)"):
+                (
+                    email, address, contact_candidates,
+                    website_cin, website_phones, official_name, official_url,
+                ) = self._enrich_from_website(company, contact_pipeline)
             cin = cin or website_cin
-            gst = gst or website_gst
             phones.extend(website_phones)
 
-        # A GSTIN published on the company's own site is used as-is; only
-        # when it isn't do we fall back to the Google search + jamku flow.
-        if not gst:
-            gst = self._gst_enrichment.resolve(official_name or company.company_name)
+        email = email or tavily_result.email
+        address = address or tavily_result.address
+        official_url = official_url or tavily_result.website
+
+        # GST Number and Turnover: the company's own website via Firecrawl,
+        # followed by the jamku turnover-slab fallback. No Tavily, no Google
+        # search is used. A value already on the record (from a prior
+        # run/import) is used as-is; the multi-tier lookup only runs for
+        # whatever is still missing.
+        gst = find_valid_gstin(company.gst) if company.gst else None
+        turnover = company.turnover
+        gst_blocked = False
+        gst_turnover_result = None
+        if not gst or (settings.ENRICHMENT_LOOKUP_TURNOVER and not turnover):
+            with _timed(company.company_name, "gst_turnover.resolve"):
+                gst_turnover_result = self._gst_turnover.resolve(
+                    official_name or company.company_name,
+                    # Kept for the existing resolver signature only.  The
+                    # Firecrawl Search GST/turnover path deliberately never
+                    # uses this website value as an input.
+                    official_url or company.website,
+                    gst=gst,
+                    city=company.city,
+                    state=company.state,
+                    industry=company.industry,
+                )
+            gst = gst or (gst_turnover_result.gst.value or None)
+            turnover = turnover or (gst_turnover_result.turnover.value or None)
+
+        if tavily_result.contact_person:
+            tavily_candidate = contact_pipeline.external_candidate(
+                tavily_result.contact_person,
+                tavily_result.designation,
+                "tavily",
+                source_url=tavily_result.contact_source_url or "tavily",
+            )
+            if tavily_candidate:
+                contact_candidates.append(tavily_candidate)
 
         if email is None or address is None:
-            tofler_address, tofler_email = self._lookup_tofler(official_name or company.company_name)
+            with _timed(company.company_name, "tofler lookup"):
+                tofler_address, tofler_email = self._lookup_tofler(official_name or company.company_name)
             email = email or tofler_email
             address = address or tofler_address
 
-        filesure_data = (
-            self._filesure.lookup(cin)
-            if cin and (address is None or gst is None or contact_person is None)
-            else None
-        )
+        need_filesure = cin and (address is None or gst is None or not contact_candidates)
+        if need_filesure and filesure_future is not None:
+            # Started in the background near the top of this method - by now
+            # the Tavily/website/GST work above has very likely already
+            # covered its wait time, so this is usually an instant .result().
+            with _timed(company.company_name, "filesure (prefetched, awaiting)"):
+                filesure_data = filesure_future.result()
+        elif need_filesure:
+            # cin only became known partway through this method (e.g. found
+            # during the website crawl), so there was nothing to prefetch.
+            with _timed(company.company_name, "filesure (cold lookup)"):
+                filesure_data = self._filesure.lookup(cin)
+        else:
+            filesure_data = None
+            if filesure_future is not None:
+                filesure_future.cancel()
         if filesure_data:
             address = address or filesure_data.address
             gst = gst or filesure_data.gst
-            contact_person = contact_person or filesure_data.contact_person
-            designation = designation or filesure_data.designation
+            # Wrapped as a candidate rather than a blind fallback fill, so a
+            # website hit and an MCA/FileSure hit for the same person raise
+            # each other's confidence instead of the first source found
+            # winning outright (Step 7 cross-source validation).
+            filesure_candidate = contact_pipeline.external_candidate(
+                filesure_data.contact_person,
+                filesure_data.designation,
+                "filesure",
+                source_url=f"filesure:{cin}",
+            )
+            if filesure_candidate:
+                contact_candidates.append(filesure_candidate)
 
         # LinkedIn is a last resort: company websites and public registries
         # remain the preferred sources for named contacts.
-        if settings.ENRICHMENT_LOOKUP_LINKEDIN and (not contact_person or not designation):
-            linkedin_contact, linkedin_designation, linkedin_profile = self._lookup_linkedin_contact(company)
-            contact_person = contact_person or linkedin_contact
-            designation = designation or linkedin_designation
-            linkedin_url = linkedin_url or linkedin_profile
+        if settings.ENRICHMENT_LOOKUP_LINKEDIN and not contact_candidates:
+            with _timed(company.company_name, "linkedin lookup"):
+                linkedin_contact, linkedin_designation, linkedin_profile = self._lookup_linkedin_contact(company)
+            linkedin_candidate = contact_pipeline.external_candidate(
+                linkedin_contact,
+                linkedin_designation,
+                "linkedin",
+                source_url=linkedin_profile or "linkedin",
+                linkedin_url=linkedin_profile,
+            )
+            if linkedin_candidate:
+                contact_candidates.append(linkedin_candidate)
 
-        # The jamku turnover lookup is intentionally downstream of GST
-        # resolution: it never receives a guessed or malformed GSTIN.
-        if settings.ENRICHMENT_LOOKUP_TURNOVER and gst and not turnover:
-            turnover = self._turnover.lookup(gst)
+        with _timed(company.company_name, "validation"):
+            contact_result = contact_pipeline.select_best(contact_candidates)
+        contact_person = contact_result.contact_person if contact_result else None
+        designation = contact_result.designation if contact_result else None
+        linkedin_url = contact_result.linkedin_url if contact_result else None
 
         # Merge website-discovered numbers with the one Maps/directory
         # search already found, keeping order and dropping duplicates,
@@ -246,24 +379,53 @@ class EnrichmentAgent(BaseClass):
                 phone_alt = candidate
                 break
 
-        city, state, region = parse_address_components(address or company.address)
-        geocoded = (
-            self._geocoder.geocode(address or company.address)
-            if not (city and state and region)
-            else None
-        )
+        city, state = parse_address_components(address or company.address)
+        city = city or tavily_result.city
+        state = state or tavily_result.state
+        if not (city and state):
+            with _timed(company.company_name, "geocoding"):
+                geocoded = self._geocoder.geocode(address or company.address)
+        else:
+            geocoded = None
         if geocoded:
             city = geocoded.city or city
             state = geocoded.state or state
-            region = geocoded.region
+        # Region is the company's state, not a Geoapify ward/suburb - those
+        # are far too granular for the "Region" column's intended meaning.
+        region = state
+
+        industry = company.industry or tavily_result.industry
+        country = company.country or tavily_result.country
+        pincode = company.pincode or tavily_result.pincode
+        business_category = company.business_category or tavily_result.business_category
+        field_confidence = tavily_result.field_confidence or company.field_confidence
+        field_evidence = tavily_result.field_evidence or company.field_evidence
+        field_sources = tavily_result.field_sources or company.field_sources
+        field_status = dict(company.field_status)
+        if gst_turnover_result:
+            field_confidence = dict(field_confidence)
+            field_sources = dict(field_sources)
+            field_evidence = dict(field_evidence)
+            field_confidence.update({"gst": gst_turnover_result.gst.confidence, "turnover": gst_turnover_result.turnover.confidence})
+            field_sources.update({"gst": gst_turnover_result.gst.source_url or "", "turnover": gst_turnover_result.turnover.source_url or ""})
+            field_status.update({"gst": gst_turnover_result.gst.status, "turnover": gst_turnover_result.turnover.status})
+            field_evidence.update({
+                "turnover_financial_year": gst_turnover_result.turnover.financial_year or "",
+                "turnover_metric": gst_turnover_result.turnover.metric or "",
+                "gst_source_type": gst_turnover_result.gst.source_type or "",
+                "turnover_source_type": gst_turnover_result.turnover.source_type or "",
+            })
+        field_status["contact"] = "verified" if contact_result and contact_result.confidence >= 90 else ("probable" if contact_result else "needs_verification")
+
+        remark = None
 
         if all(
             v is None
             for v in (email, address, contact_person, designation, linkedin_url, gst, cin, turnover)
-        ) and phone_alt is None and official_name is None:
+        ) and phone_alt is None and official_name is None and remark is None and tavily_result.is_empty():
             return company
 
-        return company.model_copy(
+        enriched = company.model_copy(
             update={
                 "email": email or company.email,
                 "company_name": official_name or company.company_name,
@@ -280,8 +442,20 @@ class EnrichmentAgent(BaseClass):
                 "city": city or company.city,
                 "state": state or company.state,
                 "region": region or company.region,
+                "remarks": remark or company.remarks,
+                "industry": industry,
+                "country": country,
+                "pincode": pincode,
+                "business_category": business_category,
+                "field_confidence": field_confidence,
+                "field_evidence": field_evidence,
+                "field_sources": field_sources,
+                "field_status": field_status,
+                "turnover_financial_year": gst_turnover_result.turnover.financial_year if gst_turnover_result else company.turnover_financial_year,
+                "turnover_metric": gst_turnover_result.turnover.metric if gst_turnover_result else company.turnover_metric,
             }
         )
+        return enriched
 
     def _lookup_linkedin_contact(
         self, company: Company
@@ -361,26 +535,17 @@ class EnrichmentAgent(BaseClass):
                 lowered = text.lower()
                 if company_terms and not any(term in lowered for term in company_terms):
                     continue
-                designation = self._target_designation_in_text(text)
+                designation = canonical_designation(text)
                 profile = card.locator('a[href*="/in/"]').first
                 if not designation or profile.count() == 0:
                     continue
                 name = (profile.inner_text(timeout=1000) or "").strip().splitlines()[0]
-                if self._looks_like_person_name(name):
+                if is_person_name(name):
                     href = profile.get_attribute("href") or ""
-                    return self._normalise_person_name(name), designation, href.split("?")[0]
+                    return normalize_name(name), designation, href.split("?")[0]
             except Exception:
                 continue
         return None, None, None
-
-    @staticmethod
-    def _target_designation_in_text(text: str) -> Optional[str]:
-        normalized = re.sub(r"\s+", " ", text or "").lower()
-        candidates = [title for group in TARGET_DESIGNATIONS for title in group["titles"]]
-        for candidate in sorted(candidates, key=len, reverse=True):
-            if re.search(r"\b" + re.escape(candidate.lower()) + r"\b", normalized):
-                return candidate
-        return None
 
     @staticmethod
     def _digits(value: Optional[str]) -> Optional[str]:
@@ -390,9 +555,16 @@ class EnrichmentAgent(BaseClass):
         return digits[-10:] if len(digits) >= 10 else digits or None
 
     def _enrich_from_website(
-        self, company: Company
-    ) -> "tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], list[str], Optional[str], Optional[str]]":
-        """Returns email, address, contact, designation, LinkedIn URL, public GSTIN, CIN, and phone numbers found."""
+        self, company: Company, contact_pipeline: ContactExtractionPipeline
+    ) -> "tuple[Optional[str], Optional[str], list, Optional[str], list[str], Optional[str], Optional[str]]":
+        """Returns email, address, contact candidates, CIN, phone numbers, and official name/URL found.
+
+        GST is intentionally not extracted here - GstTurnoverEnrichmentService
+        (see services/gst_turnover_enrichment) now owns GST/turnover discovery
+        end to end with its own dedicated website visit, so this method's
+        page-selection/early-exit rules (tuned for email/address/contact) are
+        never affected by GST/turnover-specific changes.
+        """
 
         try:
             context = self._browser.new_context()
@@ -406,10 +578,8 @@ class EnrichmentAgent(BaseClass):
                 official_url = page.url
                 email = self._extract_email(page)
                 address = self._extract_address(page)
-                contact_person, designation, linkedin_url = self._extract_contact(page)
-                gst = self._extract_gst(page)
+                contact_candidates = contact_pipeline.extract_from_page(page, page.url, classify_page(page.url))
                 cin = self._extract_cin(page)
-                pdf_gst = self._extract_gst_from_public_pdfs(page) if not gst else None
                 phones = self._extract_phones(page)
 
                 supplemental_urls = self._supplemental_urls(page)
@@ -421,23 +591,24 @@ class EnrichmentAgent(BaseClass):
                         continue
                     email = email or self._extract_email(page)
                     address = address or self._extract_address(page)
-                    gst = gst or self._extract_gst(page)
                     cin = cin or self._extract_cin(page)
-                    pdf_gst = pdf_gst or (self._extract_gst_from_public_pdfs(page) if not gst else None)
-                    if contact_person is None:
-                        contact_person, designation, linkedin_url = self._extract_contact(page)
+                    # Every visited page's candidates are kept, never just the
+                    # first page that had one (Step 3): a leadership page
+                    # visited later can still outrank a weaker contact-page
+                    # hit found earlier, once scored.
+                    contact_candidates.extend(
+                        contact_pipeline.extract_from_page(page, page.url, classify_page(page.url))
+                    )
                     if len(phones) < 2:
                         phones = list(dict.fromkeys(phones + self._extract_phones(page)))
 
-                    # A named person and GST are uncommon on industrial sites;
-                    # do not make their absence force visits to every link.
+                    # A named person is uncommon on industrial sites; do not
+                    # make their absence force visits to every link.
                     if email and address and len(phones) >= 2:
                         break
 
-                gst = gst or pdf_gst
-
                 return (
-                    email, address, contact_person, designation, linkedin_url, gst, cin, phones,
+                    email, address, contact_candidates, cin, phones,
                     official_name, official_url,
                 )
 
@@ -452,7 +623,7 @@ class EnrichmentAgent(BaseClass):
                 company.website,
                 ex,
             )
-            return None, None, None, None, None, None, None, [], None, None
+            return None, None, [], None, [], None, None
 
     @staticmethod
     def _extract_official_company_name(page: Page) -> Optional[str]:
@@ -691,20 +862,6 @@ class EnrichmentAgent(BaseClass):
 
         return numbers
 
-    def _extract_gst(self, page: Page) -> Optional[str]:
-        """Finds a public Indian GSTIN in page text or embedded HTML.
-
-        The GSTIN format is distinct enough to find it even when it appears in
-        a footer, legal modal, JSON-LD, or an otherwise hidden HTML section;
-        no guessed GST values are ever produced. Password-protected pages,
-        images, and unlinked PDFs remain intentionally out of scope.
-        """
-        try:
-            content = page.content()
-        except Exception:
-            return None
-        return self._valid_gstin_from_text(content)
-
     @staticmethod
     def _extract_cin(page: Page) -> Optional[str]:
         try:
@@ -713,46 +870,6 @@ class EnrichmentAgent(BaseClass):
             return None
         match = CIN_PATTERN.search(content)
         return match.group(0).upper() if match else None
-
-    def _extract_gst_from_public_pdfs(self, page: Page) -> Optional[str]:
-        """Scans a few public same-site PDF documents for a verified GSTIN."""
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            return None
-        base_host = urlparse(page.url).netloc.lower().removeprefix("www.")
-        links = page.locator('a[href*=".pdf" i]')
-        for i in range(min(links.count(), 3)):
-            try:
-                url = urljoin(page.url, links.nth(i).get_attribute("href") or "")
-                if urlparse(url).netloc.lower().removeprefix("www.") != base_host:
-                    continue
-                request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urlopen(request, timeout=15) as response:
-                    payload = response.read(MAX_PDF_BYTES + 1)
-                if len(payload) > MAX_PDF_BYTES:
-                    continue
-                text = "\n".join((page.extract_text() or "") for page in PdfReader(BytesIO(payload)).pages[:10])
-                gst = self._valid_gstin_from_text(text)
-                if gst:
-                    return gst
-            except Exception:
-                continue
-        return None
-
-    @staticmethod
-    def _valid_gstin_from_text(text: str) -> Optional[str]:
-        for raw in GSTIN_PATTERN.findall(text or ""):
-            gst = raw.upper()
-            total, factor = 0, 1
-            for char in gst[:-1]:
-                value = GSTIN_CHARSET.index(char) * factor
-                total += value // 36 + value % 36
-                factor = 2 if factor == 1 else 1
-            expected = GSTIN_CHARSET[(36 - total % 36) % 36]
-            if gst[-1] == expected:
-                return gst
-        return None
 
     def _extract_address(self, page: Page) -> Optional[str]:
         """
@@ -792,80 +909,7 @@ class EnrichmentAgent(BaseClass):
 
         return None
 
-    def _extract_contact(self, page: Page) -> "tuple[Optional[str], Optional[str], Optional[str]]":
-        """Returns a target-role contact published on the current page, if any.
-
-        Website text is deliberately treated as untrusted: a name is accepted only
-        when it appears close to a title that matches our designation taxonomy.
-        This avoids turning product names, navigation labels, or generic support
-        emails into fabricated people records.
-        """
-
-        try:
-            body_text = page.locator("body").inner_text(timeout=5000)
-        except Exception:
-            return None, None, None
-
-        lines = [line.strip() for line in body_text.splitlines() if line.strip()]
-        for index, line in enumerate(lines):
-            for name, title in self._name_title_candidates(line):
-                designation = extract_target_designation(title)
-                if designation and self._looks_like_person_name(name):
-                    return self._normalise_person_name(name), designation, self._extract_linkedin_url(page)
-
-            designation = extract_target_designation(line)
-            if not designation:
-                continue
-            neighbors = lines[max(0, index - 1):index] + lines[index + 1:index + 2]
-            person = next((candidate for candidate in neighbors if self._looks_like_person_name(candidate)), None)
-            if person:
-                return self._normalise_person_name(person), designation, self._extract_linkedin_url(page)
-
-        return None, None, self._extract_linkedin_url(page)
-
-    @staticmethod
-    def _name_title_candidates(line: str) -> "list[tuple[str, str]]":
-        """Returns (name, title) pairs a single line could plausibly encode.
-
-        Covers "Name (Title)" as before, plus the common team-listing
-        variants "Name - Title", "Name, Title", and "Name | Title" - in
-        both orders, since some sites list the title before the name.
-        Both halves of every candidate still have to clear the same
-        designation-taxonomy and name-shape checks as the parenthetical
-        case, so this widens *where* a match can be found, not what
-        counts as a match.
-        """
-        candidates: list[tuple[str, str]] = []
-
-        parenthetical = re.fullmatch(r"\s*([A-Za-z][A-Za-z .'-]{2,80}?)\s*\(([^()]{2,80})\)\s*", line)
-        if parenthetical:
-            candidates.append(parenthetical.groups())
-
-        parts = re.split(r"\s*[-,|]\s*", line, maxsplit=1)
-        if len(parts) == 2 and all(2 <= len(part) <= 80 for part in parts):
-            candidates.append((parts[0], parts[1]))
-            candidates.append((parts[1], parts[0]))
-
-        return candidates
-
-    @staticmethod
-    def _looks_like_person_name(value: str) -> bool:
-        words = [word.strip(".,()") for word in value.split()]
-        if not 2 <= len(words) <= 5:
-            return False
-        if any(word.lower() in NAME_EXCLUDE_WORDS for word in words):
-            return False
-        return all(word and word.replace("-", "").isalpha() for word in words)
-
-    @staticmethod
-    def _normalise_person_name(value: str) -> str:
-        return " ".join(word.capitalize() for word in value.strip().split())
-
-    @staticmethod
-    def _extract_linkedin_url(page: Page) -> Optional[str]:
-        links = page.locator('a[href*="linkedin.com"]')
-        for i in range(links.count()):
-            href = links.nth(i).get_attribute("href")
-            if href and "/in/" in href:
-                return href
-        return None
+    # Contact-person/designation extraction (name shape, designation
+    # canonicalization, candidate scoring/dedupe, and the per-container
+    # LinkedIn-URL lookup that used to live here) now lives in
+    # services/contact_extraction/ - see ContactExtractionPipeline above.

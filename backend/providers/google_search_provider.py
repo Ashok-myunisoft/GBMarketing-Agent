@@ -1,56 +1,49 @@
-from typing import List
-from urllib.parse import quote_plus
-from bs4 import BeautifulSoup
-
+from typing import List, Optional
 from providers.base_provider import BaseProvider
 from schemas.company import Company
 from schemas.search_request import SearchRequest
-from services.browser_service import BrowserService
+from services.tavily.tavily_search import TavilySearchService
 
 
 class GoogleSearchProvider(BaseProvider):
     """
-    Google Organic Search Provider
+    Backwards-compatible search provider name.
 
     Responsibilities
     ----------------
-    1. Build Google search query
-    2. Open Google Search
-    3. Parse search results
+    Older callers import this class by name, but production discovery is
+    Tavily-only.  It intentionally never opens google.com or a browser.
     4. Return Company objects
     """
 
     def __init__(self):
-        self.browser = BrowserService()
+        self._search = TavilySearchService()
 
     def search(self, request: SearchRequest) -> List[Company]:
 
-        print("\n========== Google Search Provider ==========")
+        print("\n========== Tavily Search Provider ==========")
 
         query = self._build_query(request)
 
         print(f"Search Query : {query}")
 
-        google_url = (
-            f"https://www.google.com/search?q={quote_plus(query)}"
-        )
-
-        print(f"Google URL : {google_url}")
-
+        if not self._search.is_configured:
+            return []
         try:
-
-            html = self.browser.get_page_content(google_url)
-
-            companies = self._parse_results(html)
-
-            print(f"Google Results : {len(companies)}")
-
+            results = self._search.search(query, max_results=request.max_results)
+            companies = [
+                Company(
+                    company_name=result.title.strip() or result.url,
+                    website=result.url,
+                    phone=None, email=None, address=None, city=None, state=None,
+                    industry=(result.content or result.title or None),
+                )
+                for result in results
+            ]
+            print(f"Tavily Results : {len(companies)}")
             return companies
-
         except Exception as ex:
-
-            print(f"Google Search Failed : {ex}")
-
+            print(f"Tavily Search Failed : {ex}")
             return []
 
     def _build_query(
@@ -71,39 +64,4 @@ class GoogleSearchProvider(BaseProvider):
 
         return " ".join(query_parts)
 
-    def _parse_results(self, html: str) -> List[Company]:
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        companies: List[Company] = []
-
-        results = soup.select("div.g")
-
-        for result in results:
-
-            try:
-
-                title = result.select_one("h3")
-
-                link = result.select_one("a")
-
-                if not title or not link:
-                    continue
-
-                company = Company(
-                    company_name=title.get_text(strip=True),
-                    website=link.get("href"),
-                    phone=None,
-                    email=None,
-                    address=None,
-                    city=None,
-                    state=None
-                )
-
-                companies.append(company)
-
-            except Exception:
-                continue
-
-        return companies
 

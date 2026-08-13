@@ -294,7 +294,27 @@ class BusinessDirectoryProvider(BaseProvider):
             address=None,
             city=self._extract_tradeindia_city(card),
             state=None,
+            industry=self._extract_tradeindia_listing_title(card),
         )
+
+    def _extract_tradeindia_listing_title(self, card: Locator) -> Optional[str]:
+        """
+        The product/listing title (e.g. "Bitumen Emulsion - Color: Black")
+        is the only per-result text TradeIndia exposes that reflects what
+        the seller actually offers - unlike company_name/city, it's
+        specific enough for ValidationAgent to check against the
+        requested industry instead of leaving every TradeIndia result
+        unchecked.
+        """
+
+        title = card.locator("h2.card_title")
+
+        if title.count() == 0:
+            return None
+
+        text = title.first.inner_text().strip()
+
+        return text or None
 
     def _extract_tradeindia_profile_url(self, seller_name_el: Locator) -> Optional[str]:
         """

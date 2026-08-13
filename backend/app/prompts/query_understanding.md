@@ -10,6 +10,7 @@ Extract:
 4. buyer_persona
 5. workflow
 6. confidence
+7. requested_company_count
 
 Rules:
 
@@ -23,6 +24,9 @@ Rules:
 - Extract the requested industry even when the intent is to list companies.
   For example, "list all valve industries in Hyderabad" has industry `Valve`
   and location `Hyderabad`.
+- If the user explicitly asks for a number of companies/leads/businesses
+  (for example, "find 20 companies"), return that positive integer as
+  `requested_company_count`; otherwise return `null`.
 
 Example Output
 
@@ -32,5 +36,6 @@ Example Output
     "location":"Tamil Nadu",
     "buyer_persona":"CEO",
     "workflow":"lead_generation",
+    "requested_company_count":20,
     "confidence":0.98
 }

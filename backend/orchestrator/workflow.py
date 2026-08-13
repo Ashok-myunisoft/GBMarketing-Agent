@@ -1,5 +1,5 @@
 from orchestrator.workflow_registry import WORKFLOWS
-from models.workflow_context import WorkflowContext
+from models.workflow_context import PipelineStats, RemovedCompany, WorkflowContext
 from schemas.search_request import SearchRequest
 from agents.search_agent import SearchAgent
 from agents.enrichment_agent import EnrichmentAgent
@@ -77,6 +77,18 @@ class WorkflowOrchestrator:
 
         context.companies = search_agent.execute(search_request)
 
+        stats = getattr(search_agent, "last_run_stats", None) or {}
+        context.pipeline_stats = PipelineStats(
+            raw_fetched=stats.get("raw_fetched", len(context.companies)),
+            after_search_dedup=stats.get("after_dedup", len(context.companies)),
+            after_enrichment=len(context.companies),
+            after_validation=len(context.companies),
+            removed=[
+                RemovedCompany(company_name=item["company_name"], stage="search_dedup", reason=item["reason"])
+                for item in stats.get("removed", [])
+            ],
+        )
+
         return context
 
     def _build_search_request(self, context: WorkflowContext) -> SearchRequest:
@@ -87,6 +99,7 @@ class WorkflowOrchestrator:
             industry=context.industry,
             location=context.location,
             keywords=keywords,
+            max_results=context.requested_company_count or SearchRequest.model_fields["max_results"].default,
         )
 
     def _run_enrichment(self, context: WorkflowContext) -> WorkflowContext:
@@ -97,16 +110,31 @@ class WorkflowOrchestrator:
 
         context.companies = enrichment_agent.execute(context.companies)
 
+        if context.pipeline_stats:
+            context.pipeline_stats.after_enrichment = len(context.companies)
+            context.pipeline_stats.after_validation = len(context.companies)
+
         return context
 
     def _run_validation(self, context: WorkflowContext) -> WorkflowContext:
         print("Executing -> validation")
-        context.companies = ValidationAgent().execute(
+        validation_agent = ValidationAgent()
+        context.companies = validation_agent.execute(
             context.companies,
             existing_excel_path=context.existing_excel_path,
             requested_location=context.location,
             requested_industry=context.industry,
+            requested_turnover_floor_cr=context.requested_turnover_floor_cr,
+            requested_employee_floor=context.requested_employee_floor,
+            requested_gst_required=context.requested_gst_required,
         )
+        context.validation_stats = getattr(validation_agent, "last_run_stats", None)
+        if context.pipeline_stats:
+            context.pipeline_stats.after_validation = len(context.companies)
+            context.pipeline_stats.removed = context.pipeline_stats.removed + [
+                RemovedCompany(company_name=item["company_name"], stage="validation", reason=item["reason"])
+                for item in getattr(validation_agent, "removed_companies", [])
+            ]
         return context
 
     def _run_contact(self, context: WorkflowContext) -> WorkflowContext:

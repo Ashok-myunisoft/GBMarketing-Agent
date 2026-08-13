@@ -32,3 +32,19 @@ class Company(BaseModel):
     # from one whose financial/industry data simply was not public.
     validation_status: str = "pending"
     validation_notes: list[str] = Field(default_factory=list)
+
+    # Populated by the Tavily/LLM enrichment pipeline (services/enrichment)
+    # when available. Additive only - no existing field's meaning changes,
+    # and none of these are written to the Excel export (ExportAgent reads
+    # only its fixed EXPORT_COLUMNS list), so the export format is untouched.
+    country: Optional[str] = None
+    pincode: Optional[str] = None
+    business_category: Optional[str] = None
+    field_confidence: dict[str, int] = Field(default_factory=dict)
+    field_evidence: dict[str, str] = Field(default_factory=dict)
+    field_sources: dict[str, str] = Field(default_factory=dict)
+    # Internal enrichment metadata; deliberately not part of the fixed Excel
+    # layout so existing workbooks remain compatible.
+    field_status: dict[str, str] = Field(default_factory=dict)
+    turnover_financial_year: Optional[str] = None
+    turnover_metric: Optional[str] = None

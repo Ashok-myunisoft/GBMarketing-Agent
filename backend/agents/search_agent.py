@@ -25,6 +25,7 @@ class SearchAgent(BaseClass):
         print(f"Max Results : {request.max_results}")
 
         leads = self.search_service.search(request)
+        self.last_run_stats = self.search_service.last_run_stats
 
         print(f"Leads Found : {len(leads)}")
 

@@ -54,9 +54,10 @@ RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 # -------------------------------------------------------
-# Install Playwright Chromium
+# Install Playwright browsers (chromium + firefox, alternated by
+# BrowserService to diversify automation fingerprints)
 # -------------------------------------------------------
-RUN python -m playwright install chromium
+RUN python -m playwright install chromium firefox
 
 # -------------------------------------------------------
 # Copy source code

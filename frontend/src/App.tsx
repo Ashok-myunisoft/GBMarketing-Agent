@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createJob, deleteExistingData, exportUrl, getExistingData, getJob, getJobEvents, getJobs, uploadExistingData } from "./api";
 import type { ExistingDataFile } from "./api";
-import type { Company, Job, JobEvent } from "./types";
+import type { Company, Job, JobEvent, PipelineStats } from "./types";
 
 type Page = "Dashboard" | "Lead Search" | "Search History" | "Leads" | "Companies" | "Existing Data" | "Exports" | "Settings";
 const pages: Page[] = ["Dashboard", "Lead Search", "Search History", "Leads", "Companies", "Existing Data", "Exports", "Settings"];
@@ -88,7 +88,28 @@ function LeadSearch({ query, setQuery, onSubmit, job, events }: { query: string;
   return <><form className="search-panel" onSubmit={onSubmit}><label htmlFor="query">Describe the companies you need</label><div><input id="query" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find pump manufacturers in Coimbatore" /><button className="primary" type="submit">Start lead search</button></div><p>Example: “Find 50 textile manufacturers in Coimbatore and identify their Managing Director.”</p></form>
     {!job && <section className="empty-state"><h2>Your workflow will appear here</h2><p>Start a search to see real-time progress, events, and lead results.</p></section>}
     {job && <section className="job-grid"><div className="panel"><div className="panel-title"><div><p className="eyebrow">Current workflow</p><h2>{job.query}</h2></div><Status status={job.status} /></div><Workflow status={job.status} currentStep={job.current_step} /><p className="job-meta">Created {formatDate(job.created_at)} · {job.lead_count} leads available</p></div><LiveLogs events={events} /></section>}
-    {job?.result && <section className="panel results-preview"><div className="panel-title"><div><p className="eyebrow">Results</p><h2>{job.result.industry || "Lead"} companies {job.result.location ? `in ${job.result.location}` : ""}</h2></div><a className="download" href={exportUrl(job.id)}>Download Excel</a></div><LeadTable companies={job.result.companies.slice(0, 10)} filter="all" setFilter={() => undefined} preview /></section>}</>;
+    {job?.result && <section className="panel results-preview"><div className="panel-title"><div><p className="eyebrow">Results</p><h2>{job.result.industry || "Lead"} companies {job.result.location ? `in ${job.result.location}` : ""}</h2>{job.result.validation_stats && <p className="job-meta">{job.result.validation_stats.new} new · {job.result.validation_stats.duplicates} already in export · {job.result.validation_stats.rejected} rejected</p>}</div><a className="download" href={exportUrl(job.id)}>Download Excel</a></div>{job.result.pipeline_stats && <PipelineFunnel stats={job.result.pipeline_stats} />}<LeadTable companies={job.result.companies.slice(0, 10)} filter="all" setFilter={() => undefined} preview /></section>}
+    {job?.result?.pipeline_stats && <RemovedLeads stats={job.result.pipeline_stats} />}</>;
+}
+
+function PipelineFunnel({ stats }: { stats: PipelineStats }) {
+  return <div className="stats pipeline-funnel">
+    <Stat label="Raw fetched" value={stats.raw_fetched} />
+    <Stat label="After dedup" value={stats.after_search_dedup} />
+    <Stat label="After enrichment" value={stats.after_enrichment} />
+    <Stat label="After validation" value={stats.after_validation} />
+  </div>;
+}
+
+function RemovedLeads({ stats }: { stats: PipelineStats }) {
+  const removed = stats.removed;
+  if (!removed.length) return null;
+  return <section className="panel removed-panel">
+    <div className="panel-title"><div><h2>Removed leads <span className="muted">{removed.length}</span></h2><p>Companies found during this run that were dropped before the final results, and why.</p></div></div>
+    <div className="table-wrap"><table><thead><tr><th>Company</th><th>Stage</th><th>Reason</th></tr></thead><tbody>
+      {removed.map((item, index) => <tr key={`${item.company_name}-${index}`}><td><strong>{item.company_name}</strong></td><td className="mono">{item.stage === "search_dedup" ? "Search dedup" : "Validation"}</td><td>{item.reason}</td></tr>)}
+    </tbody></table></div>
+  </section>;
 }
 
 function History({ jobs, onSelect, compact = false }: { jobs: Job[]; onSelect: (job: Job) => void; compact?: boolean }) {

@@ -18,6 +18,29 @@ export type Company = {
   validation_notes: string[];
 };
 
+export type ValidationStats = {
+  scanned: number;
+  new: number;
+  duplicates: number;
+  rejected: number;
+  out_of_area: number;
+  no_identifiers: number;
+};
+
+export type RemovedCompany = {
+  company_name: string;
+  stage: "search_dedup" | "validation";
+  reason: string;
+};
+
+export type PipelineStats = {
+  raw_fetched: number;
+  after_search_dedup: number;
+  after_enrichment: number;
+  after_validation: number;
+  removed: RemovedCompany[];
+};
+
 export type WorkflowResult = {
   user_query: string;
   industry?: string | null;
@@ -26,6 +49,8 @@ export type WorkflowResult = {
   confidence?: number | null;
   companies: Company[];
   export_path?: string | null;
+  validation_stats?: ValidationStats | null;
+  pipeline_stats?: PipelineStats | null;
 };
 
 export type JobEvent = {

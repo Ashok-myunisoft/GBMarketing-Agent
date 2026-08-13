@@ -1,4 +1,6 @@
+import itertools
 import logging
+import threading
 from typing import Optional
 
 from playwright.sync_api import (
@@ -15,14 +17,38 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONTEXT_OPTIONS = {
-    "user_agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
+# Sites that specifically fingerprint headless Chromium (CDP artifacts,
+# navigator.webdriver, etc.) see every request from this app as the same
+# browser. Alternating the engine each time a new browser process is
+# launched spreads that fingerprint across two genuinely different
+# automation signatures instead of presenting one repeatedly.
+_ENGINE_CYCLE = itertools.cycle(("chromium", "firefox"))
+_ENGINE_CYCLE_LOCK = threading.Lock()
+
+
+def _next_rotating_engine() -> str:
+    with _ENGINE_CYCLE_LOCK:
+        return next(_ENGINE_CYCLE)
+
+
+BASE_CONTEXT_OPTIONS = {
     "locale": "en-IN",
     "timezone_id": "Asia/Kolkata",
     "viewport": {"width": 1366, "height": 768},
+}
+
+# A context's User-Agent has to match the engine actually driving it - a
+# Firefox process sending a Chrome UA string is an inconsistency that's
+# easier to flag as spoofed than either genuine UA on its own.
+ENGINE_USER_AGENTS = {
+    "chromium": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "firefox": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) "
+        "Gecko/20100101 Firefox/132.0"
+    ),
 }
 
 
@@ -40,17 +66,27 @@ class BrowserService:
         headless: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         max_retries: int = 2,
+        engine: Optional[str] = None,
     ):
         self._headless = settings.PLAYWRIGHT_HEADLESS if headless is None else headless
         self._timeout_ms = settings.PLAYWRIGHT_TIMEOUT_MS if timeout_ms is None else timeout_ms
         self._max_retries = max_retries
+        # None/"rotate" picks a fresh engine (alternating chromium/firefox)
+        # each time start() actually launches a browser; pass "chromium" or
+        # "firefox" explicitly to pin one.
+        self._requested_engine = engine or settings.PLAYWRIGHT_ENGINE
 
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
+        self._engine_name: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
         return self._browser is not None
+
+    @property
+    def engine_name(self) -> Optional[str]:
+        return self._engine_name
 
     def start(self) -> None:
         """Launch the browser process. Safe to call more than once."""
@@ -58,12 +94,20 @@ class BrowserService:
         if self.is_running:
             return
 
-        logger.info("Starting browser (headless=%s)", self._headless)
+        engine_name = (
+            _next_rotating_engine()
+            if self._requested_engine == "rotate"
+            else self._requested_engine
+        )
+
+        logger.info("Starting browser (engine=%s, headless=%s)", engine_name, self._headless)
 
         self._playwright = sync_playwright().start()
 
         try:
-            self._browser = self._playwright.chromium.launch(headless=self._headless)
+            engine = getattr(self._playwright, engine_name)
+            self._browser = engine.launch(headless=self._headless)
+            self._engine_name = engine_name
         except Exception:
             self._playwright.stop()
             self._playwright = None
@@ -79,6 +123,8 @@ class BrowserService:
         if self._playwright is not None:
             self._playwright.stop()
             self._playwright = None
+
+        self._engine_name = None
 
         logger.info("Browser stopped")
 
@@ -105,7 +151,11 @@ class BrowserService:
         if not self.is_running:
             raise RuntimeError("BrowserService.start() must be called before new_context()")
 
-        options = {**DEFAULT_CONTEXT_OPTIONS, **kwargs}
+        default_options = {
+            **BASE_CONTEXT_OPTIONS,
+            "user_agent": ENGINE_USER_AGENTS[self._engine_name],
+        }
+        options = {**default_options, **kwargs}
         return self._browser.new_context(**options)
 
     def new_page(self, context: Optional[BrowserContext] = None) -> Page:
@@ -115,6 +165,15 @@ class BrowserService:
         page = owned_context.new_page()
         page.set_default_timeout(self._timeout_ms)
         return page
+
+    # These indicate the host/domain itself is unreachable (dead DNS, offline
+    # site, refused connection) rather than a slow-but-alive page - retrying
+    # them burns a full timeout cycle per attempt for no benefit, unlike a
+    # genuine timeout which may succeed on a second try.
+    _PERMANENT_NAV_ERROR_MARKERS = (
+        "ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED",
+        "NS_ERROR_UNKNOWN_HOST", "ERR_CONNECTION_REFUSED",
+    )
 
     def goto(self, page: Page, url: str, wait_until: str = "domcontentloaded") -> None:
         """Navigate to a URL, retrying transient failures up to max_retries times."""
@@ -132,6 +191,9 @@ class BrowserService:
                 logger.warning(
                     "Navigation failed for %s (attempt %d/%d): %s", url, attempt, attempts, e
                 )
+                if any(marker in str(e) for marker in self._PERMANENT_NAV_ERROR_MARKERS):
+                    logger.info("Permanent navigation failure for %s - not retrying", url)
+                    break
 
         raise RuntimeError(f"Failed to load '{url}' after {attempts} attempt(s)") from last_error
 

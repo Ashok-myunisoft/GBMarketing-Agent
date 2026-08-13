@@ -24,6 +24,11 @@ class SearchService:
             BusinessDirectoryProvider()
         ]
 
+        # Populated by search(); read by SearchAgent/WorkflowOrchestrator to
+        # report the raw-vs-deduped funnel and why each cross-provider
+        # duplicate was dropped, without changing this method's return type.
+        self.last_run_stats: dict = {"raw_fetched": 0, "after_dedup": 0, "removed": []}
+
     def search(self, request: SearchRequest) -> List[Company]:
 
         print("\n========== Search Service Started ==========")
@@ -49,7 +54,13 @@ class SearchService:
                 except Exception as ex:
                     print(f"{provider.__class__.__name__} failed : {str(ex)}")
 
-        companies = self._remove_duplicates(all_companies)
+        companies, removed = self._remove_duplicates(all_companies)
+
+        self.last_run_stats = {
+            "raw_fetched": len(all_companies),
+            "after_dedup": len(companies),
+            "removed": removed,
+        }
 
         print(f"\nTotal Companies : {len(companies)}")
 
@@ -60,13 +71,15 @@ class SearchService:
     def _remove_duplicates(
         self,
         companies: List[Company]
-    ) -> List[Company]:
+    ) -> "tuple[List[Company], List[dict]]":
         """
-        Remove duplicate companies based on
-        company name + website.
+        Remove duplicate companies based on company name + website, and
+        report the specific ones dropped (e.g. the same business found by
+        both GoogleMapsProvider and BusinessDirectoryProvider).
         """
 
         unique = {}
+        removed: List[dict] = []
 
         for company in companies:
 
@@ -77,5 +90,10 @@ class SearchService:
 
             if key not in unique:
                 unique[key] = company
+            else:
+                removed.append({
+                    "company_name": company.company_name or "(unnamed)",
+                    "reason": "duplicate result for the same company found by another provider/query",
+                })
 
-        return list(unique.values())
+        return list(unique.values()), removed

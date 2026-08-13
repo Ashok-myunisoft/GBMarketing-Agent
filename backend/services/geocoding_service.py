@@ -18,7 +18,6 @@ GEOAPIFY_URL = "https://api.geoapify.com/v1/geocode/search"
 class GeocodedAddress:
     city: Optional[str]
     state: Optional[str]
-    region: Optional[str]
 
 
 class GeoapifyGeocodingService:
@@ -56,16 +55,9 @@ class GeoapifyGeocodingService:
             if not result or result.get("country_code", "").lower() != "in":
                 self._cache[cache_key] = None
                 return None
-            region = (
-                result.get("suburb")
-                or result.get("neighbourhood")
-                or result.get("district")
-                or result.get("city_district")
-            )
             geocoded = GeocodedAddress(
                 city=result.get("city") or result.get("municipality"),
                 state=result.get("state"),
-                region=region,
             )
             self._cache[cache_key] = geocoded
             return geocoded

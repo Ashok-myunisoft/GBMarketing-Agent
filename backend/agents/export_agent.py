@@ -18,6 +18,7 @@ EXPORT_COLUMNS = [
     ("Website URL", "website"), ("Remarks", "remarks"), ("Followup", "followup"),
 ]
 LEGACY_GST_HEADERS = {"GST Confidence", "GST Sources"}
+EXTRACTED_ON_HEADER = "Extracted On"
 
 class ExportAgent(BaseClass):
     def execute(self, companies: list[Company], output_path: Optional[str] = None) -> str:
@@ -30,32 +31,41 @@ class ExportAgent(BaseClass):
         path = Path(output_path) if output_path else MASTER_EXPORT_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         headers = [header for header, _ in EXPORT_COLUMNS]
+        full_headers = headers + [EXTRACTED_ON_HEADER]
         if path.exists():
             from openpyxl import load_workbook
             workbook = load_workbook(path)
             sheet = workbook["Leads"] if "Leads" in workbook.sheetnames else workbook.active
             existing_headers = [cell.value for cell in sheet[1]]
-            if existing_headers != headers:
+            if existing_headers != full_headers:
                 legacy_columns = [i for i, header in enumerate(existing_headers, start=1) if header in LEGACY_GST_HEADERS]
                 remaining_headers = [header for header in existing_headers if header not in LEGACY_GST_HEADERS]
-                if legacy_columns and remaining_headers == headers:
+                if legacy_columns and remaining_headers == full_headers:
                     for column_index in sorted(legacy_columns, reverse=True):
                         sheet.delete_cols(column_index)
+                elif remaining_headers == headers:
+                    # Older export predates the "Extracted On" column - add it
+                    # without touching rows written before this change.
+                    for column_index in sorted(legacy_columns, reverse=True):
+                        sheet.delete_cols(column_index)
+                    extra_cell = sheet.cell(row=1, column=len(headers) + 1, value=EXTRACTED_ON_HEADER)
+                    extra_cell.font = Font(bold=True)
                 else:
                     raise ValueError(f"Master export has unexpected headers: {path}")
         else:
             workbook = Workbook()
             sheet = workbook.active
             sheet.title = "Leads"
-            sheet.append(headers)
+            sheet.append(full_headers)
             for cell in sheet[1]:
                 cell.font = Font(bold=True)
+        extracted_on = datetime.now().strftime("%Y-%m-%d %H:%M")
         for company in companies:
             sheet.append([
                 ("; ".join(value) if isinstance(value, list) else value)
                 if (value := getattr(company, field)) is not None else ""
                 for _, field in EXPORT_COLUMNS
-            ])
+            ] + [extracted_on])
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for column in sheet.columns:

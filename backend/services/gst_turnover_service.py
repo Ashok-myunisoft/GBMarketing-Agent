@@ -21,7 +21,6 @@ from typing import Optional
 from playwright.sync_api import BrowserContext, Page
 
 from services.browser_service import BrowserService
-from services.google_search_service import GoogleSearchService
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +38,11 @@ class GstTurnoverService:
 
     def __init__(self, browser: BrowserService):
         self._browser = browser
-        self._google = GoogleSearchService(browser)
         self._cache: dict[str, Optional[str]] = {}
         self._jamku_url: Optional[str] = None
+        # Reused across every lookup() call instead of a fresh anonymous
+        # context per GSTIN - see GstEnrichmentService for the same choice.
+        self._context: Optional[BrowserContext] = None
 
     def lookup(self, gstin: Optional[str]) -> Optional[str]:
         if not gstin:
@@ -53,8 +54,19 @@ class GstTurnoverService:
         self._cache[normalized] = label
         return label
 
+    def _get_context(self) -> BrowserContext:
+        if self._context is None:
+            self._context = self._browser.new_context()
+        return self._context
+
+    def close(self) -> None:
+        """Closes the shared context. Call once the owning worker is done with this service."""
+        if self._context is not None:
+            self._context.close()
+            self._context = None
+
     def _lookup_live(self, gstin: str) -> Optional[str]:
-        context = self._browser.new_context()
+        context = self._get_context()
         try:
             page = self._browser.new_page(context)
             try:
@@ -77,17 +89,12 @@ class GstTurnoverService:
         except Exception as exc:
             logger.warning("jamku turnover lookup failed for %s: %s", gstin, exc)
             return None
-        finally:
-            context.close()
 
     def _resolve_jamku_url(self, context: BrowserContext) -> Optional[str]:
-        """Finds gst.jamku.app the same way a user would: search, take the first organic result."""
+        """Uses Jamku's known public endpoint; never discovers it through Google."""
         if self._jamku_url:
             return self._jamku_url
-        urls = self._google.organic_result_urls(JAMKU_SEARCH_QUERY, context, limit=5)
-        if not urls:
-            logger.info("jamku portal search returned nothing; falling back to %s", JAMKU_FALLBACK_URL)
-        self._jamku_url = urls[0] if urls else JAMKU_FALLBACK_URL
+        self._jamku_url = JAMKU_FALLBACK_URL
         return self._jamku_url
 
     @staticmethod

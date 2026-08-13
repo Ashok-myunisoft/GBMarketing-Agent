@@ -12,6 +12,8 @@ import logging
 import re
 from typing import Optional
 
+from playwright.sync_api import BrowserContext
+
 from services.browser_service import BrowserService
 from services.google_search_service import GoogleSearchService
 
@@ -27,21 +29,40 @@ class GstEnrichmentService:
     def __init__(self, browser: BrowserService):
         self._browser = browser
         self._google = GoogleSearchService(browser)
+        # Reused across every resolve() call instead of a fresh anonymous
+        # context per company - one browsing session running several
+        # searches looks like a real user, where relaunching a "new
+        # identity" for every single query looks like a bot.
+        self._context: Optional[BrowserContext] = None
+
+    @property
+    def last_blocked(self) -> bool:
+        """Whether the most recent resolve() call was blocked by Google
+        rather than genuinely finding no GSTIN - see GoogleSearchService."""
+        return self._google.last_blocked
 
     def resolve(self, company_name: Optional[str]) -> Optional[str]:
         """Returns a checksum-valid GSTIN found for the company, or None."""
         if not company_name:
             return None
 
-        context = self._browser.new_context()
         try:
-            text = self._google.search_text(f"{company_name} GST Number", context)
+            text = self._google.search_text(f"{company_name} GST Number", self._get_context())
             return self._first_valid_gstin(text)
         except Exception as exc:
             logger.warning("GST search failed for %r: %s", company_name, exc)
             return None
-        finally:
-            context.close()
+
+    def _get_context(self) -> BrowserContext:
+        if self._context is None:
+            self._context = self._browser.new_context()
+        return self._context
+
+    def close(self) -> None:
+        """Closes the shared context. Call once the owning worker is done with this service."""
+        if self._context is not None:
+            self._context.close()
+            self._context = None
 
     @classmethod
     def _first_valid_gstin(cls, text: str) -> Optional[str]:
