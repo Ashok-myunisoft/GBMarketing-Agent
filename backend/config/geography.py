@@ -20,6 +20,31 @@ CITY_ALIASES = {
     "tiruchirappalli": "Tiruchirappalli", "trichy": "Tiruchirappalli",
 }
 
+# Seed locality/industrial-area list for the cities already covered by
+# CITY_ALIASES. Used only to fan a single "<industry> <city>" search query
+# out into several "<industry> <locality>, <city>" queries (see
+# services/search_services.py) so Google Maps/TradeIndia/Tavily each surface
+# a broader, non-identical slice of businesses for that city instead of
+# whatever one city-wide query happens to rank first - those platforms don't
+# expose a "give me everything" mode, only "give me your top results for
+# this query", so more distinctly-worded queries is the lever available.
+#
+# This is a starting seed, not exhaustive - expand it the same way as
+# CITY_ALIASES: add localities here as the sales team identifies more for a
+# target city. A city missing from this table (or not yet in CITY_ALIASES)
+# simply searches as a single query, exactly as before this table existed.
+CITY_LOCALITIES: dict[str, list[str]] = {
+    "Coimbatore": ["Peelamedu", "Ganapathy", "Saravanampatti", "Kalapatti", "Singanallur"],
+    "Chennai": ["Ambattur", "Guindy", "Perungudi", "Sriperumbudur", "Ekkatuthangal"],
+    "Bengaluru": ["Peenya", "Jigani", "Electronic City", "Whitefield", "Bommasandra"],
+    "Tiruppur": ["Kumar Nagar", "Veerapandi", "Avinashi Road"],
+    "Madurai": ["Tallakulam", "Goripalayam", "K. Pudur"],
+    "Salem": ["Ammapet", "Hasthampatti", "Suramangalam"],
+    "Erode": ["Perundurai", "Erode SIPCOT"],
+    "Hosur": ["Hosur SIPCOT", "Bommasandra Industrial Area"],
+    "Tiruchirappalli": ["BHEL Township", "Thillai Nagar", "Srirangam"],
+}
+
 STATE_NAMES = (
     "Tamil Nadu", "Karnataka", "Kerala", "Andhra Pradesh", "Telangana",
     "Maharashtra", "Gujarat", "Rajasthan", "Delhi", "Uttar Pradesh",
@@ -32,6 +57,25 @@ STATE_NAMES = (
 def canonical_city(value: Optional[str]) -> Optional[str]:
     text = (value or "").lower()
     return next((city for alias, city in CITY_ALIASES.items() if re.search(r"\b" + re.escape(alias) + r"\b", text)), None)
+
+
+def location_query_variants(location: Optional[str]) -> "list[Optional[str]]":
+    """Expands a requested location into itself plus its known localities
+    (CITY_LOCALITIES), e.g. "Coimbatore" -> ["Coimbatore", "Peelamedu,
+    Coimbatore", "Ganapathy, Coimbatore", ...], so a search can be fanned out
+    across several distinctly-worded queries for the same city instead of
+    just one.
+
+    Falls back to [location] - a single-element list, unchanged behaviour -
+    whenever the location is empty or its city isn't in CITY_LOCALITIES yet.
+    """
+    if not location or not location.strip():
+        return [location]
+    city = canonical_city(location)
+    localities = CITY_LOCALITIES.get(city, []) if city else []
+    if not localities:
+        return [location]
+    return [location] + [f"{locality}, {city}" for locality in localities]
 
 
 def _normalize(value: Optional[str]) -> str:

@@ -1,6 +1,6 @@
 import unittest
 
-from config.geography import classify_location
+from config.geography import CITY_LOCALITIES, classify_location, location_query_variants
 
 
 class ClassifyLocationTests(unittest.TestCase):
@@ -72,6 +72,26 @@ class ClassifyLocationTests(unittest.TestCase):
     def test_state_request_tolerates_a_typo_of_the_same_state(self):
         decision, _ = classify_location("Ahmedabad", "Gujarat", "Ahmedabad, Gujarat, India", "Gujrat")
         self.assertEqual(decision, "match")
+
+
+class LocationQueryVariantsTests(unittest.TestCase):
+    def test_unseeded_city_returns_only_the_original_location(self):
+        self.assertEqual(location_query_variants("Dubai"), ["Dubai"])
+
+    def test_empty_or_missing_location_is_returned_unchanged(self):
+        self.assertEqual(location_query_variants(""), [""])
+        self.assertEqual(location_query_variants(None), [None])
+
+    def test_seeded_city_expands_to_itself_plus_each_known_locality(self):
+        variants = location_query_variants("Coimbatore")
+        self.assertEqual(variants[0], "Coimbatore")
+        self.assertEqual(len(variants), 1 + len(CITY_LOCALITIES["Coimbatore"]))
+        for locality in CITY_LOCALITIES["Coimbatore"]:
+            self.assertIn(f"{locality}, Coimbatore", variants)
+
+    def test_alias_resolves_to_the_canonical_city_before_expanding(self):
+        variants = location_query_variants("Bangalore")
+        self.assertIn("Peenya, Bengaluru", variants)
 
 
 if __name__ == "__main__":

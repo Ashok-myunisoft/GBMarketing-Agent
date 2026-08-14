@@ -21,6 +21,12 @@ class Settings:
     RUNPOD_INPUT_MODE = os.getenv("RUNPOD_INPUT_MODE", "prompt").lower()
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY")
+    # Off by default: config/geography.CITY_LOCALITIES' static seed list is
+    # used for search fan-out unchanged unless this is explicitly turned on.
+    # When enabled (and GEOAPIFY_API_KEY is set), services/locality_service.py
+    # additionally discovers real suburbs/neighbourhoods for the requested
+    # city via Geoapify, so fan-out isn't limited to the hand-picked seed.
+    LOCALITY_DISCOVERY_ENABLED = os.getenv("LOCALITY_DISCOVERY_ENABLED", "false").lower() == "true"
     FILESURE_API_KEY = os.getenv("FILESURE_API_KEY") or os.getenv("FILE_SURE_API_KEY")
 
     LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL")
