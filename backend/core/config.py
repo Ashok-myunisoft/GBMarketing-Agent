@@ -93,6 +93,15 @@ class Settings:
     MAX_FIRECRAWL_PAGES_PER_COMPANY = max(1, int(os.getenv("MAX_FIRECRAWL_PAGES_PER_COMPANY", "5")))
     FIRECRAWL_SEARCH_TIMEOUT_SECONDS = max(1, int(os.getenv("FIRECRAWL_SEARCH_TIMEOUT_SECONDS", "30")))
     FIRECRAWL_SEARCH_MAX_RETRIES = max(0, int(os.getenv("FIRECRAWL_SEARCH_MAX_RETRIES", "1")))
+    
+
+    DATABASE_URL = os.getenv("DATABASE_URL")
+
+    POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+    POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
+    POSTGRES_DB = os.getenv("POSTGRES_DB", "marketing_agent")
+    POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
+    POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 
 
 settings = Settings()
