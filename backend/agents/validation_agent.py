@@ -12,6 +12,7 @@ from agents.base_agent import BaseClass
 from config.geography import classify_location
 from config.targeting import match_target_industry, parse_turnover_range
 from schemas.company import Company
+from services.mlead.repository import MleadRepository
 
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_EXISTING_DATA_DIR = BACKEND_DIR / "Existing-data"
 MASTER_EXPORT_PATH = BACKEND_DIR / "exports" / "All_Extracted_Leads.xlsx"
+
+# Single shared repository instance - a thin, stateless-per-call wrapper
+# around a PostgreSQL connection to the EXISTING production table
+# public.mlead (see services/mlead/repository.py). Not a new table.
+_mlead_repository = MleadRepository()
 
 
 class ValidationAgent(BaseClass):
@@ -43,6 +49,32 @@ class ValidationAgent(BaseClass):
         existing_keys = self._load_existing_keys(source)
         if MASTER_EXPORT_PATH.exists():
             existing_keys.update(self._load_existing_keys(MASTER_EXPORT_PATH))
+
+        # Persistent baseline: existing production leads in PostgreSQL
+        # public.mlead (~136 historical rows plus anything since accepted),
+        # so history survives container stop/restart/recreate (the
+        # file-based baseline above lives inside the container). Reuses
+        # the exact same _company_keys matching used everywhere else in
+        # this method - it does not introduce a second matching rule.
+        postgres_key_to_id: dict[str, int] = {}
+        for row in self._load_mlead_rows():
+            history_company = Company(
+                company_name=row.get("company_name") or "",
+                gst=row.get("gst"),
+                website=row.get("website_url"),
+                email=row.get("email_id"),
+                phone=row.get("mobile_number"),
+                phone_alt=row.get("alternate_mobile_number"),
+                city=row.get("city"),
+                industry=row.get("industry_type"),
+                region=row.get("region"),
+                contact_person=row.get("contact_person"),
+                designation=row.get("designation"),
+            )
+            for key in self._company_keys(history_company):
+                existing_keys.add(key)
+                postgres_key_to_id[key] = row["lead_id"]
+
         kept: list[Company] = []
         seen: set[str] = set()
         duplicate_count = 0
@@ -118,11 +150,16 @@ class ValidationAgent(BaseClass):
                 # A note enrichment already attached (e.g. a blocked GST
                 # lookup) is appended to, never replaced by, validation's
                 # own notes - both are independently useful to a reader.
-                kept.append(company.model_copy(update={
+                accepted = company.model_copy(update={
                     "validation_status": status,
                     "validation_notes": notes,
                     "remarks": "; ".join(note for note in (company.remarks, "; ".join(notes)) if note),
-                }))
+                })
+                kept.append(accepted)
+                # This is the point the existing workflow treats a lead as
+                # actually accepted (not merely discovered) - the correct
+                # insertion point for the persistent PostgreSQL baseline.
+                self._remember_in_mlead(accepted, keys, postgres_key_to_id)
             else:
                 rejected_count += 1
                 removed.append({
@@ -250,6 +287,64 @@ class ValidationAgent(BaseClass):
         if name:
             keys.add(f"name:{name}")
         return keys
+
+    def _load_mlead_rows(self) -> list[dict]:
+        """Read the PostgreSQL public.mlead baseline.
+
+        Failures are logged and treated as "no persistent history for this
+        run" rather than raised, so a temporarily unreachable database
+        degrades gracefully to the existing file-based baseline instead of
+        breaking the search/enrichment/validation/export pipeline. This is
+        the documented fallback: if PostgreSQL is down, deduplication runs
+        on the Existing-data/exports files only, exactly as it did before
+        this change, until the database is reachable again.
+        """
+        try:
+            return _mlead_repository.fetch_all()
+        except Exception:
+            logger.exception("mlead: failed to read PostgreSQL baseline (public.mlead); continuing without it")
+            return []
+
+    def _remember_in_mlead(self, company: Company, keys: set[str], postgres_key_to_id: dict[str, int]) -> None:
+        """Persist an accepted lead into public.mlead so future runs
+        (including after a container restart) recognise it via the
+        existing dedup keys.
+
+        If a matching row already exists (per the same keys used for the
+        dedup check above), nothing is written - this avoids creating an
+        unnecessary duplicate row in the 136-row production table.
+
+        Never raises - a persistence failure must not fail an otherwise
+        successful validation/export run, but is always logged clearly.
+        """
+        try:
+            existing_id = next((postgres_key_to_id[key] for key in keys if key in postgres_key_to_id), None)
+            if existing_id is not None:
+                logger.debug("mlead: lead already present as lead_id=%s, skipping insert", existing_id)
+                return
+            new_id = _mlead_repository.save(
+                company_name=company.company_name or "",
+                gst=company.gst,
+                website_url=company.website,
+                mobile_number=company.phone,
+                alternate_mobile_number=company.phone_alt,
+                email_id=company.email,
+                city=company.city,
+                industry_type=company.industry,
+                region=company.region,
+                contact_person=company.contact_person,
+                designation=company.designation,
+                remarks=company.remarks,
+            )
+            # Keep the in-memory map current so a second company later in
+            # the same run that matches this one is skipped, not re-inserted.
+            for key in keys:
+                postgres_key_to_id[key] = new_id
+        except Exception:
+            logger.exception(
+                "mlead: failed to persist accepted lead '%s' to PostgreSQL (public.mlead)",
+                company.company_name,
+            )
 
     def _load_existing_keys(self, path: Path) -> set[str]:
         if not path.exists():
