@@ -103,5 +103,8 @@ class Settings:
     POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
     POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 
+    EXCEL_TEMPLATE_PATH: str = "templates/LeadImport_template.xlsx"
+    EXCEL_TEMPLATE_HEADER_ROW: int | None = None
+
 
 settings = Settings()

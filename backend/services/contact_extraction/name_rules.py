@@ -11,6 +11,8 @@ scoring can't confidently pick between candidates, not for name shape itself.
 
 import re
 
+from services.contact_extraction.designation_rules import is_exact_match as _is_known_designation
+
 # Same stoplist EnrichmentAgent used (moved here, not duplicated elsewhere):
 # rejects company/nav/product words that would otherwise pass the shape
 # checks below (e.g. "Butterfly Valves" is 2 alphabetic words too).
@@ -27,6 +29,15 @@ NAME_EXCLUDE_WORDS = {
 
 _TITLE_TOKENS = {"dr", "mr", "mrs", "ms", "shri", "smt", "prof"}
 _SUFFIX_TOKENS = {"jr", "sr", "ii", "iii"}
+
+# Generic single-word job-title terms that services/contact_extraction/
+# designation_rules.py's canonical table either doesn't define on their own
+# (e.g. bare "President") or only defines as part of a compound title (e.g.
+# "IT Head", "Country Head", never standalone "Head"). A candidate made up
+# entirely of these words (e.g. "Chief Executive Officer") is a title, not a
+# person's name, even though none of its individual words are company/nav
+# text and would otherwise be excluded by NAME_EXCLUDE_WORDS above.
+_GENERIC_TITLE_WORDS = {"president", "chief", "executive", "officer", "head", "chairperson"}
 
 # A single initial ("K", "A.") or a run of them without spaces ("A.K.").
 _INITIAL_RE = re.compile(r"^[A-Za-z]\.?$")
@@ -70,15 +81,34 @@ def is_person_name(value: str) -> bool:
     if not 2 <= len(core) <= 5:
         return False
 
+    # A candidate that is itself a known job title/designation - whether a
+    # single canonical term or a short compound like "Managing Director" -
+    # is not a person's name, however name-shaped it reads structurally.
+    # Checked up front so a two-word title doesn't slip through just
+    # because both of its words individually pass the per-token checks
+    # below (neither "Managing" nor "Director" is in NAME_EXCLUDE_WORDS).
+    if _is_known_designation(" ".join(core)):
+        return False
+
     real_words = 0
+    title_words = 0
     for token in core:
         if _INITIAL_RE.match(token) or _MULTI_INITIAL_RE.match(token):
             continue
         if not _WORD_RE.match(token):
             return False
-        if len(token) >= 2 and token.lower() in NAME_EXCLUDE_WORDS:
+        lowered = token.lower()
+        if len(token) >= 2 and lowered in NAME_EXCLUDE_WORDS:
             return False
+        if lowered in _GENERIC_TITLE_WORDS:
+            title_words += 1
         real_words += 1
+
+    # Every real (non-initial) token was a generic title word (e.g. "Chief
+    # Executive Officer") - none of those words individually qualifies as
+    # company/nav text above, but together they are nothing but a title.
+    if real_words and title_words == real_words:
+        return False
 
     return real_words >= 1
 

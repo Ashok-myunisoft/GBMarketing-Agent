@@ -1,17 +1,21 @@
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from schemas.request import ChatRequest
 from agents.conversation_agent import ConversationAgent
+from agents.export_agent import ExportAgent
 from services.llm_services import LLMTemporarilyUnavailableError
 from services.job_service import JobService
 from services.existing_data_service import ExistingDataService
+from services.mlead.repository import MleadRepository
 
 router = APIRouter()
 job_service = JobService()
 existing_data_service = ExistingDataService()
+mlead_repository = MleadRepository()
 
 @router.post("/Ask")
 def chat(request: ChatRequest):
@@ -102,17 +106,42 @@ def get_lead(lead_id: str):
 
 @router.get("/jobs/{job_id}/export")
 def download_export(job_id: str):
+    """Downloads the COMPLETE current public.mlead dataset as XLSX.
+
+    job_id is used ONLY to verify the requested job exists and has
+    completed - per the updated business requirement, the exported
+    dataset is always ALL of public.mlead (the permanent source of
+    truth), never just this job's newly extracted leads. See
+    MleadRepository.get_all_leads().
+
+    Read-only with respect to PostgreSQL: this issues a single SELECT
+    (via MleadRepository) and nothing else - no insert/update/delete/
+    deduplication happens as part of a download, and it never depends on
+    job["result"]["export_path"] or job["result"]["companies"].
+    """
     job = job_service.store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    export_path = (job.get("result") or {}).get("export_path")
-    path = Path(export_path) if export_path else None
-    if not path or not path.is_file():
+    if job.get("status") != "completed":
         raise HTTPException(status_code=404, detail="Export is not available yet")
-    return FileResponse(
-        path,
+
+    try:
+        companies = mlead_repository.get_all_leads()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Unable to read leads from the database") from exc
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # An explicit, not-yet-existing output path so ExportAgent builds a
+        # fresh workbook - from the current lead_template.xlsx - rather
+        # than appending to the shared cross-job master export file.
+        output_path = Path(tmp_dir) / f"leads_{job_id}.xlsx"
+        ExportAgent().execute(companies, output_path=str(output_path))
+        content = output_path.read_bytes()
+
+    return Response(
+        content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=path.name,
+        headers={"Content-Disposition": f'attachment; filename="leads_{job_id}.xlsx"'},
     )
 
 
