@@ -16,6 +16,7 @@ using the field mapping below.
 Field mapping (public.mlead -> Company):
     company_name             -> company_name
     gst                      -> gst
+    turn_over                 -> turnover
     website_url               -> website
     mobile_number              -> phone
     alternate_mobile_number    -> phone_alt
@@ -25,11 +26,8 @@ Field mapping (public.mlead -> Company):
     region                    -> region
     contact_person              -> contact_person
     designation                -> designation
+    linkedin_id                -> linkedin_url
     remarks                  -> remarks
-
-``turn_over`` and ``linkedin_id`` are intentionally left untouched on
-insert (no source field was specified for them) - never populated with
-fabricated data.
 """
 
 from __future__ import annotations
@@ -42,6 +40,7 @@ import psycopg2
 import psycopg2.extras
 
 from core.config import settings
+from schemas.company import Company
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +94,53 @@ class MleadRepository:
                 )
                 return [dict(row) for row in cur.fetchall()]
 
+    def get_all_leads(self) -> list[Company]:
+        """Return the COMPLETE current public.mlead dataset as Company
+        objects - every stored lead, not any particular job's newly
+        extracted subset.
+
+        This is the read-only counterpart to fetch_all() (which returns
+        raw dicts, purpose-built for dedup-key matching). get_all_leads()
+        is for the Download XLSX flow: PostgreSQL is the export dataset,
+        so this issues a single SELECT and nothing else - no insert,
+        update, delete, or deduplication happens here.
+        """
+        with closing(self._connect()) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT lead_id, company_name, gst, turn_over, region, city,
+                           industry_type, contact_person, designation,
+                           mobile_number, alternate_mobile_number, email_id,
+                           linkedin_id, website_url, remarks
+                    FROM public.mlead
+                    ORDER BY lead_id;
+                    """
+                )
+                rows = cur.fetchall()
+        return [self._row_to_company(row) for row in rows]
+
+    @staticmethod
+    def _row_to_company(row: dict[str, Any]) -> Company:
+        """Map one public.mlead row to a Company, handling NULLs safely."""
+        turn_over = row.get("turn_over")
+        return Company(
+            company_name=row.get("company_name") or "",
+            gst=row.get("gst"),
+            turnover=str(turn_over) if turn_over is not None else None,
+            region=row.get("region"),
+            city=row.get("city"),
+            industry=row.get("industry_type"),
+            contact_person=row.get("contact_person"),
+            designation=row.get("designation"),
+            phone=row.get("mobile_number"),
+            phone_alt=row.get("alternate_mobile_number"),
+            email=row.get("email_id"),
+            linkedin_url=row.get("linkedin_id"),
+            website=row.get("website_url"),
+            remarks=row.get("remarks"),
+        )
+
     # ------------------------------------------------------------------
     # write
     # ------------------------------------------------------------------
@@ -115,6 +161,10 @@ class MleadRepository:
         remarks: Optional[str] = None,
     ) -> int:
         """Insert a newly accepted lead into public.mlead. Returns lead_id.
+
+        ``turn_over`` and ``linkedin_id`` are intentionally left untouched
+        on insert (extraction has no source field for them) - never
+        populated with fabricated data.
 
         Whether a lead is "new" is decided by the caller (by matching
         against ``fetch_all()`` output via the existing dedup keys) -

@@ -10,6 +10,7 @@ from services.browser_service import BrowserService
 from services.crawler import document_builder
 from services.crawler.html_crawler import CrawledPage, crawl, fetch_single_page
 from services.crawler.pdf_crawler import CrawledPdf, fetch_pdf
+from services.gst_turnover_enrichment.firecrawl_client import FirecrawlClient
 from services.extractor import llm_extractor
 from services.extractor.schema import ExtractedCompanyRecord
 from services.tavily.base import SearchProvider, SearchResult
@@ -70,9 +71,20 @@ class TavilyEnrichmentResult:
 
 
 class CompanyTavilyEnrichmentService:
-    def __init__(self, browser: BrowserService, search_provider: Optional[SearchProvider] = None):
+    def __init__(
+        self,
+        browser: BrowserService,
+        search_provider: Optional[SearchProvider] = None,
+        firecrawl: Optional[FirecrawlClient] = None,
+    ):
         self._browser = browser
         self._search = search_provider or TavilySearchService()
+        # Same FirecrawlClient instance EnrichmentAgent already owns should
+        # be passed in where possible (shares its global cache/rate
+        # limiter/concurrency slots - see FirecrawlClient's docstring); a
+        # fresh one is created here only as a fallback for callers/tests
+        # that construct this service on its own.
+        self._firecrawl = firecrawl or FirecrawlClient()
 
     def gather(self, company_name: str, website: Optional[str] = None) -> TavilyEnrichmentResult:
         has_known_website = bool(website and website.startswith("http"))
@@ -226,7 +238,7 @@ class CompanyTavilyEnrichmentService:
                     if len(pdfs) >= settings.TAVILY_MAX_PDFS or pdf_url in seen_pdf_urls:
                         continue
                     seen_pdf_urls.add(pdf_url)
-                    pdf = fetch_pdf(pdf_url, label)
+                    pdf = self._safe_fetch_pdf(pdf_url, label)
                     if pdf:
                         pdfs.append(pdf)
         logger.info("[PERF] website discovery: %d ms", round((time.monotonic() - discovery_started) * 1000))
@@ -239,7 +251,7 @@ class CompanyTavilyEnrichmentService:
                 if len(pdfs) >= settings.TAVILY_MAX_PDFS or result.url in seen_pdf_urls:
                     continue
                 seen_pdf_urls.add(result.url)
-                pdf = fetch_pdf(result.url, result.title)
+                pdf = self._safe_fetch_pdf(result.url, result.title)
                 if pdf:
                     pdfs.append(pdf)
                 continue
@@ -259,6 +271,21 @@ class CompanyTavilyEnrichmentService:
                 visited_hosts.add(_host(result.url))
 
         return pages, pdfs
+
+    def _safe_fetch_pdf(self, url: str, label: str) -> Optional[CrawledPdf]:
+        """fetch_pdf() already catches its own Firecrawl/network/pypdf
+        failures and returns None - this extra guard exists so that even an
+        unexpected error at this call site (e.g. a bad argument) can never
+        discard the rest of this company's already-collected pages/PDFs by
+        propagating out of _crawl() into gather()'s broad try/except. One
+        PDF failing is just one missing source, never a reason to fail the
+        whole enrichment pass."""
+
+        try:
+            return fetch_pdf(url, label, firecrawl=self._firecrawl)
+        except Exception as ex:
+            logger.warning("PDF enrichment skipped for %s: %s", url, ex)
+            return None
 
     @staticmethod
     def _to_result(

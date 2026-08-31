@@ -126,7 +126,76 @@ def _parse_json(response: str) -> Any:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         cleaned = "\n".join(lines).strip()
-    return json.loads(cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        # The LLM call is capped at max_tokens (see extract() above) and can
+        # get cut off mid-response - most often mid-string-value or with a
+        # trailing key left incomplete. Rather than discarding every field
+        # the model already returned, try to salvage the JSON up to its last
+        # fully-formed element before giving up. Still raises (unchanged
+        # behaviour) if the text isn't recoverable this way.
+        repaired = _repair_truncated_json(cleaned)
+        if repaired is None:
+            raise
+        return json.loads(repaired)
+
+
+def _repair_truncated_json(text: str) -> Optional[str]:
+    """Best-effort recovery for a JSON response cut off mid-structure.
+
+    Walks `text` tracking bracket/string state and remembers the last point
+    at which everything parsed so far was a complete, balanced element (right
+    after a closing '}'/']' or at a top-level comma) along with what was
+    still open at that point. If the text is truncated - meaning something
+    is still open at the very end - it's cut back to that last safe point
+    and the still-open brackets from there are appended to close it off.
+
+    Deliberately conservative: returns None (no guess) whenever the JSON
+    isn't simply truncated (already balanced, or malformed some other way),
+    so the caller's existing json.JSONDecodeError handling is unaffected in
+    every other case.
+    """
+
+    stack: "list[str]" = []
+    in_string = False
+    escape = False
+    last_safe_index: Optional[int] = None
+    last_safe_stack: Optional["list[str]"] = None
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]":
+            if not stack or stack[-1] != char:
+                return None  # Mismatched closer - not a simple truncation.
+            stack.pop()
+            last_safe_index = index + 1
+            last_safe_stack = list(stack)
+        elif char == "," and stack:
+            last_safe_index = index
+            last_safe_stack = list(stack)
+
+    if not stack or last_safe_index is None or last_safe_stack is None:
+        # Nothing left open (a different parse error, not truncation) or no
+        # complete element was ever found to salvage.
+        return None
+
+    truncated = text[:last_safe_index].rstrip().rstrip(",")
+    closers = "".join(reversed(last_safe_stack))
+    return truncated + closers
 
 
 def _str_or_none(value: Any) -> Optional[str]:

@@ -78,6 +78,16 @@ def discover_internal_links(page, base_url: str, limit: int) -> "list[str]":
             parsed = urlparse(absolute)
             if parsed.scheme not in {"http", "https"} or parsed.netloc.lower().removeprefix("www.") != base_host:
                 continue
+            # A PDF link (e.g. "company-profile.pdf") can match these same
+            # keyword hints ("profile", "annual-report", "brochure"...) but
+            # must never go through browser.goto() - Playwright treats it as
+            # a download, not a navigable page, and the navigation fails
+            # after burning its full retry budget (see BrowserService.goto).
+            # same_site_pdf_links() (_read_pdf_links below) already collects
+            # every same-site PDF on each visited page for the existing PDF
+            # extraction path, so skipping it here loses nothing.
+            if ".pdf" in parsed.path.lower():
+                continue
             haystack = f"{label} {parsed.path.lower()}"
             if not any(term in haystack for term in LINK_TEXT_HINTS):
                 continue

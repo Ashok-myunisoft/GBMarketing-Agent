@@ -126,7 +126,12 @@ class EnrichmentAgent(BaseClass):
         # services/enrichment/company_enrichment.py). A no-op whenever
         # TAVILY_API_KEY isn't configured, so this is safe to always
         # construct - existing behaviour is unchanged until a key is set.
-        self._tavily = tavily_enrichment or CompanyTavilyEnrichmentService(self._browser)
+        # Shares this agent's own FirecrawlClient (same global cache/rate
+        # limiter/concurrency slots) instead of constructing a second one,
+        # so PDF enrichment in the Tavily pass and GST/turnover enrichment
+        # aren't independently rate-limited against the same Firecrawl
+        # deployment.
+        self._tavily = tavily_enrichment or CompanyTavilyEnrichmentService(self._browser, firecrawl=self._firecrawl)
         self._linkedin_context: Optional[BrowserContext] = None
         self._linkedin_authenticated = False
         self._linkedin_unavailable = False
