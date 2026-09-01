@@ -22,12 +22,6 @@ class SearchRequest(BaseModel):
     # independently and inspected/filtered individually downstream.
     keywords: List[str] = Field(default_factory=list)
 
-    # Upper bound on how many companies SearchAgent should return. This is
-    # a safety ceiling, not a target - it must never be the reason a run
-    # returns fewer companies than actually exist for the query. Each
-    # provider already stops on its own once a region is genuinely
-    # exhausted (GoogleMapsProvider/BusinessDirectoryProvider both scroll
-    # or paginate until listing growth plateaus, backed by their own
-    # MAX_SCROLL_ATTEMPTS/MAX_TRADEINDIA_PAGES caps on request duration),
-    # so this only needs to sit far above any real result count.
-    max_results: int = 100_000
+    # A practical default keeps ordinary requests fast.  Explicit larger
+    # requests remain supported by the planner.
+    max_results: int = 50

@@ -1,12 +1,3 @@
-"""GSTIN discovery for the lead enrichment pipeline.
-
-A single Google search ("<company name> GST Number") is enough to surface a
-GSTIN directly in the rendered result snippets for most Indian companies, so
-this reads the search-results page itself rather than following any link.
-The first candidate that passes the GSTIN checksum is returned; no scoring
-or LLM verification is involved - the checksum is the only correctness
-guarantee, matching how a human would eyeball the same search results.
-"""
 
 import logging
 import re
@@ -29,10 +20,7 @@ class GstEnrichmentService:
     def __init__(self, browser: BrowserService):
         self._browser = browser
         self._google = GoogleSearchService(browser)
-        # Reused across every resolve() call instead of a fresh anonymous
-        # context per company - one browsing session running several
-        # searches looks like a real user, where relaunching a "new
-        # identity" for every single query looks like a bot.
+
         self._context: Optional[BrowserContext] = None
 
     @property

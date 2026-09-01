@@ -28,7 +28,7 @@ _mlead_repository = MleadRepository()
 
 
 class ValidationAgent(BaseClass):
-    """Removes duplicates and rejects only records with known ICP failures.
+    """Rejects only records that conflict with an established lead baseline.
 
     Public directories rarely expose financials or headcount, so missing data is
     marked as unverified instead of silently excluding an otherwise useful lead.
@@ -76,7 +76,6 @@ class ValidationAgent(BaseClass):
                 postgres_key_to_id[key] = row["lead_id"]
 
         kept: list[Company] = []
-        seen: set[str] = set()
         duplicate_count = 0
         rejected_count = 0
         out_of_area_count = 0
@@ -94,15 +93,11 @@ class ValidationAgent(BaseClass):
                     "reason": "no identifying details (name, GST, website, phone, or email) to validate against",
                 })
                 continue
-            if keys & seen:
-                duplicate_count += 1
-                removed.append({
-                    "company_name": name,
-                    "reason": "duplicate of another result already found in this run",
-                })
-                continue
-            seen.update(keys)
-
+            # Do not remove one newly extracted result merely because another
+            # provider/locality returned it in this same run.  Validation's
+            # deduplication authority is the established export/database
+            # baseline below; search-stage deduplication remains responsible
+            # for collapsing obvious name+website repeats.
             if keys & existing_keys:
                 duplicate_count += 1
                 removed.append({
@@ -114,7 +109,12 @@ class ValidationAgent(BaseClass):
             location_note = None
             if requested_location:
                 decision, reason = classify_location(
-                    company.city, company.state, company.address, requested_location
+                    company.city,
+                    company.state,
+                    company.address,
+                    requested_location,
+                    company_district=company.district,
+                    company_locality=company.locality,
                 )
                 logger.info(
                     "[LOCATION] requested=%s company=%s resolved_city=%s resolved_state=%s decision=%s reason=%s",

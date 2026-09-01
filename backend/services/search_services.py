@@ -1,5 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor
-from math import ceil
 from typing import List, Optional
 
 from schemas.company import Company
@@ -41,50 +40,30 @@ class SearchService:
 
         print("\n========== Search Service Started ==========")
 
+        industries = search_industry_queries(request.industry)
+        locations = self._location_variants_for(request.location)
+        primary_location, *fallback_locations = locations
+        per_query_limit = min(request.max_results, settings.SEARCH_RESULTS_PER_QUERY)
         all_companies: List[Company] = []
 
-        industries = search_industry_queries(request.industry)
-        # Fans a single "<industry> <city>" query out into one query per
-        # known locality of that city too (e.g. "<industry> Peelamedu,
-        # Coimbatore") - each provider only ever returns its own top results
-        # for one exact query, so more distinctly-worded queries is what
-        # surfaces a broader slice of real businesses instead of the same
-        # top-ranked handful every time. Cities with no seeded localities
-        # (config/geography.CITY_LOCALITIES) fall back to the single
-        # original location - unchanged behaviour.
-        locations = self._location_variants_for(request.location)
-        per_query_limit = max(1, ceil(request.max_results / (len(industries) * len(locations))))
-
-        query_requests = [
-            request.model_copy(
-                update={"industry": industry, "location": location, "max_results": per_query_limit}
-            )
-            for industry in industries
-            for location in locations
-        ]
-
-        # One worker thread per provider, each running that provider's full
-        # set of industry/location queries in sequence - not one worker per
-        # query. Playwright's sync API is thread-affine (see EnrichmentAgent):
-        # a single browser must only ever be driven from the thread that
-        # started it, so GoogleMapsProvider/BusinessDirectoryProvider's
-        # shared browser can't be hit by multiple threads at once. Keeping
-        # exactly one thread per provider satisfies that while still letting
-        # the (up to) 3 providers - previously fully serial - run
-        # concurrently, and lets _run_provider_queries start each provider's
-        # browser once and reuse it for every query instead of relaunching
-        # per call.
-        with ThreadPoolExecutor(
-            max_workers=max(1, len(self.providers)), thread_name_prefix="search-provider"
-        ) as executor:
-            futures = [
-                executor.submit(self._run_provider_queries, provider, query_requests)
-                for provider in self.providers
+        def search_location(location: Optional[str]) -> None:
+            query_requests = [
+                request.model_copy(
+                    update={"industry": industry, "location": location, "max_results": per_query_limit}
+                )
+                for industry in industries
             ]
-            for future in futures:
-                all_companies.extend(future.result())
+            all_companies.extend(self._search_requests(query_requests))
 
+        # The city is the broadest, highest-value query.  Only search a
+        # locality when it is actually needed to reach the desired lead count.
+        search_location(primary_location)
         companies, removed = self._remove_duplicates(all_companies)
+        for locality in fallback_locations:
+            if len(companies) >= request.max_results:
+                break
+            search_location(locality)
+            companies, removed = self._remove_duplicates(all_companies)
 
         self.last_run_stats = {
             "raw_fetched": len(all_companies),
@@ -98,17 +77,30 @@ class SearchService:
 
         return companies[:request.max_results]
 
+    def _search_requests(self, query_requests: List[SearchRequest]) -> List[Company]:
+        """Run a small city/locality batch across providers in parallel."""
+        all_companies: List[Company] = []
+
+        # One worker thread per provider, each running its own small batch in
+        # sequence.  Browser-backed providers remain thread-affine.
+        with ThreadPoolExecutor(
+            max_workers=max(1, len(self.providers)), thread_name_prefix="search-provider"
+        ) as executor:
+            futures = [
+                executor.submit(self._run_provider_queries, provider, query_requests)
+                for provider in self.providers
+            ]
+            for future in futures:
+                all_companies.extend(future.result())
+
+        return all_companies
+
     def _location_variants_for(self, location: Optional[str]) -> "list[Optional[str]]":
         """
-        Starts from config/geography.location_query_variants() (the static
-        CITY_LOCALITIES seed - a handful of localities for a handful of
-        cities, unchanged behaviour) and, only when
-        settings.LOCALITY_DISCOVERY_ENABLED is on and Geoapify is
-        configured, adds every extra suburb/neighbourhood Geoapify itself
-        knows for this city - seeded or not - so coverage isn't capped at
-        whatever's been hand-added to the static list. Purely additive:
-        the static variants are always included, and any failure to reach
-        Geoapify just means no extra variants this run, never fewer.
+        Starts from the static locality seed and, only when discovery is on,
+        requests no more than the configured number of additional localities
+        from Geoapify.  Search() uses these as fallback queries after the
+        broad city query, rather than running every variant unconditionally.
         """
 
         variants = location_query_variants(location)
@@ -121,7 +113,9 @@ class SearchService:
         if not city:
             return variants
 
-        discovered = self._locality_service.localities_for(city)
+        discovered = self._locality_service.localities_for(
+            city, max_localities=settings.LOCALITY_DISCOVERY_MAX_VARIANTS
+        )
 
         if not discovered:
             return variants

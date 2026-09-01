@@ -95,11 +95,24 @@ class ValidationAgentTests(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertTrue(any("location" in note for note in kept[0].validation_notes))
 
-    def test_duplicate_within_the_same_run_is_dropped(self):
+    def test_company_in_requested_locality_is_kept(self):
+        company = _company(
+            city="Chennai", state="Tamil Nadu", district="Chennai", locality="Ambattur",
+        )
+        kept = self._run([company], requested_location="Ambattur")
+        self.assertEqual(len(kept), 1)
+
+    def test_company_only_confirmed_at_city_level_is_not_rejected_for_locality_request(self):
+        company = _company(city="Chennai", state="Tamil Nadu")
+        kept = self._run([company], requested_location="Ambattur")
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(any("location" in note for note in kept[0].validation_notes))
+
+    def test_duplicate_within_the_same_run_is_not_removed_by_validation(self):
         first = _company()
         second = _company()
         kept = self._run([first, second])
-        self.assertEqual(len(kept), 1)
+        self.assertEqual(len(kept), 2)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,17 @@ class Company(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
+    # Structured geography populated during enrichment.  These fields are
+    # internal metadata; exports remain backward compatible unless their
+    # column mapping is explicitly extended.
+    district: Optional[str] = None
+    locality: Optional[str] = None
+    location_id: Optional[str] = None
+    city_id: Optional[str] = None
+    district_id: Optional[str] = None
+    state_id: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     industry: Optional[str] = None
     turnover: Optional[str] = None
     employee_count: Optional[str] = None

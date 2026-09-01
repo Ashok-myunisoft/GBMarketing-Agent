@@ -10,7 +10,14 @@ from urllib.parse import quote_plus, urljoin, urlparse
 from playwright.sync_api import BrowserContext, Page
 
 from agents.base_agent import BaseClass
-from config.geography import parse_address_components
+from config.geography import (
+    CITY_DISTRICTS,
+    canonical_city,
+    canonical_district,
+    canonical_locality,
+    hierarchy_ids,
+    parse_address_components,
+)
 from core.config import settings
 from schemas.company import Company
 from services.browser_service import BrowserService
@@ -387,7 +394,10 @@ class EnrichmentAgent(BaseClass):
         city, state = parse_address_components(address or company.address)
         city = city or tavily_result.city
         state = state or tavily_result.state
-        if not (city and state):
+        normalized_city = canonical_city(city) or city
+        district = canonical_district(company.district) or CITY_DISTRICTS.get(normalized_city)
+        locality = canonical_locality(company.locality, normalized_city) or canonical_locality(address or company.address, normalized_city)
+        if not (city and state and district and locality):
             with _timed(company.company_name, "geocoding"):
                 geocoded = self._geocoder.geocode(address or company.address)
         else:
@@ -395,6 +405,9 @@ class EnrichmentAgent(BaseClass):
         if geocoded:
             city = geocoded.city or city
             state = geocoded.state or state
+            district = geocoded.district or district
+            locality = geocoded.locality or locality
+        location_ids = hierarchy_ids(state, district, city, locality)
         # Region is the company's state, not a Geoapify ward/suburb - those
         # are far too granular for the "Region" column's intended meaning.
         region = state
@@ -423,11 +436,18 @@ class EnrichmentAgent(BaseClass):
         field_status["contact"] = "verified" if contact_result and contact_result.confidence >= 90 else ("probable" if contact_result else "needs_verification")
 
         remark = None
+        geography_changed = any((
+            city and city != company.city,
+            state and state != company.state,
+            district and district != company.district,
+            locality and locality != company.locality,
+            location_ids["location_id"] and location_ids["location_id"] != company.location_id,
+        ))
 
         if all(
             v is None
             for v in (email, address, contact_person, designation, linkedin_url, gst, cin, turnover)
-        ) and phone_alt is None and official_name is None and remark is None and tavily_result.is_empty():
+        ) and phone_alt is None and official_name is None and remark is None and tavily_result.is_empty() and not geography_changed:
             return company
 
         enriched = company.model_copy(
@@ -446,6 +466,14 @@ class EnrichmentAgent(BaseClass):
                 "turnover": turnover,
                 "city": city or company.city,
                 "state": state or company.state,
+                "district": district or company.district,
+                "locality": locality or company.locality,
+                "location_id": location_ids["location_id"] or company.location_id,
+                "city_id": location_ids["city_id"] or company.city_id,
+                "district_id": location_ids["district_id"] or company.district_id,
+                "state_id": location_ids["state_id"] or company.state_id,
+                "latitude": (geocoded.latitude if geocoded else None) or company.latitude,
+                "longitude": (geocoded.longitude if geocoded else None) or company.longitude,
                 "region": region or company.region,
                 "remarks": remark or company.remarks,
                 "industry": industry,

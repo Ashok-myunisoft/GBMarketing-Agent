@@ -1,6 +1,6 @@
 import unittest
 
-from config.geography import CITY_LOCALITIES, classify_location, location_query_variants
+from config.geography import CITY_LOCALITIES, classify_location, hierarchy_ids, location_query_variants
 
 
 class ClassifyLocationTests(unittest.TestCase):
@@ -73,6 +73,31 @@ class ClassifyLocationTests(unittest.TestCase):
         decision, _ = classify_location("Ahmedabad", "Gujarat", "Ahmedabad, Gujarat, India", "Gujrat")
         self.assertEqual(decision, "match")
 
+    def test_district_request_matches_a_city_with_that_seeded_parent(self):
+        decision, _ = classify_location("Chennai", "Tamil Nadu", None, "Chennai district")
+        self.assertEqual(decision, "match")
+
+    def test_district_request_rejects_a_city_in_a_different_known_district(self):
+        decision, _ = classify_location("Hosur", "Tamil Nadu", None, "Chennai")
+        self.assertEqual(decision, "outside")
+
+    def test_locality_request_matches_company_locality(self):
+        decision, _ = classify_location(
+            "Chennai", "Tamil Nadu", "Ambattur, Chennai, Tamil Nadu",
+            "Ambattur", company_locality="Ambattur",
+        )
+        self.assertEqual(decision, "match")
+
+    def test_city_only_company_is_unknown_for_a_more_specific_locality_request(self):
+        decision, _ = classify_location("Chennai", "Tamil Nadu", None, "Ambattur")
+        self.assertEqual(decision, "unknown")
+
+    def test_confirmed_different_locality_is_outside(self):
+        decision, _ = classify_location(
+            "Chennai", "Tamil Nadu", None, "Ambattur", company_locality="Guindy",
+        )
+        self.assertEqual(decision, "outside")
+
 
 class LocationQueryVariantsTests(unittest.TestCase):
     def test_unseeded_city_returns_only_the_original_location(self):
@@ -92,6 +117,15 @@ class LocationQueryVariantsTests(unittest.TestCase):
     def test_alias_resolves_to_the_canonical_city_before_expanding(self):
         variants = location_query_variants("Bangalore")
         self.assertIn("Peenya, Bengaluru", variants)
+
+
+class HierarchyIdTests(unittest.TestCase):
+    def test_ids_are_stable_for_a_resolved_hierarchy(self):
+        ids = hierarchy_ids("Tamil Nadu", "Chennai", "Chennai", "Ambattur")
+        self.assertEqual(ids["state_id"], "in.state.tamilnadu")
+        self.assertEqual(ids["district_id"], "in.state.tamilnadu.district.chennai")
+        self.assertEqual(ids["city_id"], "in.state.tamilnadu.district.chennai.city.chennai")
+        self.assertTrue(ids["location_id"].endswith(".locality.ambattur"))
 
 
 if __name__ == "__main__":

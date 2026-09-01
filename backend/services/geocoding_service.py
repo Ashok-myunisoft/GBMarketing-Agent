@@ -18,6 +18,11 @@ GEOAPIFY_URL = "https://api.geoapify.com/v1/geocode/search"
 class GeocodedAddress:
     city: Optional[str]
     state: Optional[str]
+    district: Optional[str] = None
+    locality: Optional[str] = None
+    location_id: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 class GeoapifyGeocodingService:
@@ -58,6 +63,11 @@ class GeoapifyGeocodingService:
             geocoded = GeocodedAddress(
                 city=result.get("city") or result.get("municipality"),
                 state=result.get("state"),
+                district=result.get("district") or result.get("county"),
+                locality=result.get("suburb") or result.get("neighbourhood"),
+                location_id=result.get("place_id"),
+                latitude=result.get("lat"),
+                longitude=result.get("lon"),
             )
             self._cache[cache_key] = geocoded
             return geocoded

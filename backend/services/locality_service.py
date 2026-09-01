@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 GEOCODE_URL = "https://api.geoapify.com/v1/geocode/search"
 PLACES_URL = "https://api.geoapify.com/v2/places"
 LOCALITY_CATEGORIES = "populated_place.suburb,populated_place.neighbourhood,populated_place.district"
-MAX_LOCALITIES = 25
+# Discovery retrieves pages until the provider has no more results. Search
+# fan-out applies its own lower cap, so complete discovery data can later be
+# reused by hierarchy resolution without generating unlimited provider calls.
+LOCALITY_PAGE_SIZE = 100
 
 
 class GeoapifyLocalityService:
@@ -43,24 +46,24 @@ class GeoapifyLocalityService:
 
     def __init__(self, api_key: Optional[str] = None):
         self._api_key = api_key or settings.GEOAPIFY_API_KEY
-        self._cache: "dict[str, List[str]]" = {}
+        self._cache: "dict[tuple[str, Optional[int]], List[str]]" = {}
         self._last_request_at = 0.0
 
     @property
     def is_configured(self) -> bool:
         return bool(self._api_key)
 
-    def localities_for(self, city: str) -> List[str]:
-        """Returns every suburb/neighbourhood/district Geoapify knows for
-        `city` (e.g. "Chennai" -> ["Ambattur", "Velachery", ...]), or []
-        if not configured, the city can't be resolved, or the lookup
-        fails for any reason.
+    def localities_for(self, city: str, max_localities: Optional[int] = None) -> List[str]:
+        """Returns known suburbs/neighbourhoods/districts for ``city``.
+
+        ``max_localities`` stops discovery as soon as enough entries have
+        been read, avoiding pages that SearchService would not use.
         """
 
         if not self._api_key or not city or not city.strip():
             return []
 
-        cache_key = city.strip().lower()
+        cache_key = (city.strip().lower(), max_localities)
 
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -71,7 +74,7 @@ class GeoapifyLocalityService:
             if not place_id:
                 localities: List[str] = []
             else:
-                localities = self._fetch_localities(place_id)
+                localities = self._fetch_localities(place_id, max_localities=max_localities)
 
         except Exception as exc:
             logger.warning("Geoapify locality discovery failed for '%s': %s", city, exc)
@@ -113,28 +116,39 @@ class GeoapifyLocalityService:
 
         return result.get("place_id")
 
-    def _fetch_localities(self, place_id: str) -> List[str]:
-        query = urlencode({
-            "categories": LOCALITY_CATEGORIES,
-            "filter": f"place:{place_id}",
-            "limit": MAX_LOCALITIES,
-            "apiKey": self._api_key,
-        })
-        payload = self._get(f"{PLACES_URL}?{query}")
-
+    def _fetch_localities(self, place_id: str, max_localities: Optional[int] = None) -> List[str]:
         names: List[str] = []
         seen = set()
+        offset = 0
 
-        for feature in payload.get("features", []):
-            name = (feature.get("properties") or {}).get("name")
+        while True:
+            query = urlencode({
+                "categories": LOCALITY_CATEGORIES,
+                "filter": f"place:{place_id}",
+                "limit": min(LOCALITY_PAGE_SIZE, max_localities) if max_localities else LOCALITY_PAGE_SIZE,
+                "offset": offset,
+                "apiKey": self._api_key,
+            })
+            payload = self._get(f"{PLACES_URL}?{query}")
+            features = payload.get("features", [])
 
-            if not name:
-                continue
+            for feature in features:
+                name = (feature.get("properties") or {}).get("name")
 
-            key = name.strip().lower()
+                if not name:
+                    continue
 
-            if key and key not in seen:
-                seen.add(key)
-                names.append(name)
+                key = name.strip().lower()
+
+                if key and key not in seen:
+                    seen.add(key)
+                    names.append(name)
+                    if max_localities and len(names) >= max_localities:
+                        return names
+
+            page_size = min(LOCALITY_PAGE_SIZE, max_localities) if max_localities else LOCALITY_PAGE_SIZE
+            if len(features) < page_size:
+                break
+            offset += page_size
 
         return names

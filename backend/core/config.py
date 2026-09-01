@@ -27,6 +27,12 @@ class Settings:
     # additionally discovers real suburbs/neighbourhoods for the requested
     # city via Geoapify, so fan-out isn't limited to the hand-picked seed.
     LOCALITY_DISCOVERY_ENABLED = os.getenv("LOCALITY_DISCOVERY_ENABLED", "false").lower() == "true"
+    # Bound query fan-out even when a provider knows hundreds of localities.
+    # The original city query is always retained in addition to these extras.
+    LOCALITY_DISCOVERY_MAX_VARIANTS = max(0, int(os.getenv("LOCALITY_DISCOVERY_MAX_VARIANTS", "5")))
+    # Search the city first and add localities only when more coverage is
+    # needed.  This cap keeps every individual provider request bounded.
+    SEARCH_RESULTS_PER_QUERY = max(1, int(os.getenv("SEARCH_RESULTS_PER_QUERY", "20")))
     FILESURE_API_KEY = os.getenv("FILESURE_API_KEY") or os.getenv("FILE_SURE_API_KEY")
 
     LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL")

@@ -45,6 +45,23 @@ CITY_LOCALITIES: dict[str, list[str]] = {
     "Tiruchirappalli": ["BHEL Township", "Thillai Nagar", "Srirangam"],
 }
 
+# The static hierarchy is deliberately a small, high-confidence fallback.
+# Dynamic providers can add localities at search time, but validation must not
+# infer a parent relationship it cannot prove.  Add cities/districts here as
+# the supported sales geography grows, or replace this seed with an imported
+# administrative dataset.
+CITY_DISTRICTS: dict[str, str] = {
+    "Coimbatore": "Coimbatore",
+    "Chennai": "Chennai",
+    "Bengaluru": "Bengaluru Urban",
+    "Tiruppur": "Tiruppur",
+    "Madurai": "Madurai",
+    "Salem": "Salem",
+    "Erode": "Erode",
+    "Hosur": "Krishnagiri",
+    "Tiruchirappalli": "Tiruchirappalli",
+}
+
 STATE_NAMES = (
     "Tamil Nadu", "Karnataka", "Kerala", "Andhra Pradesh", "Telangana",
     "Maharashtra", "Gujarat", "Rajasthan", "Delhi", "Uttar Pradesh",
@@ -57,6 +74,34 @@ STATE_NAMES = (
 def canonical_city(value: Optional[str]) -> Optional[str]:
     text = (value or "").lower()
     return next((city for alias, city in CITY_ALIASES.items() if re.search(r"\b" + re.escape(alias) + r"\b", text)), None)
+
+
+def canonical_locality(value: Optional[str], city: Optional[str] = None) -> Optional[str]:
+    """Return a known locality only when its parent city is unambiguous.
+
+    A locality name can occur in more than one city.  When the caller has a
+    city, restrict matching to that city; otherwise return a locality only if
+    it appears under exactly one seeded city.  This preserves the validation
+    rule that missing evidence is ``unknown``, never a guessed match.
+    """
+    text = (value or "").lower()
+    candidate_cities = [city] if city else list(CITY_LOCALITIES)
+    matches = []
+    for candidate_city in candidate_cities:
+        for locality in CITY_LOCALITIES.get(candidate_city or "", []):
+            if re.search(r"\b" + re.escape(locality.lower()) + r"\b", text):
+                matches.append(locality)
+    return matches[0] if len(set(matches)) == 1 else None
+
+
+def canonical_district(value: Optional[str]) -> Optional[str]:
+    """Resolve one of the districts represented by the trusted seed data."""
+    text = (value or "").lower()
+    return next(
+        (district for district in dict.fromkeys(CITY_DISTRICTS.values())
+         if re.search(r"\b" + re.escape(district.lower()) + r"\b", text)),
+        None,
+    )
 
 
 def location_query_variants(location: Optional[str]) -> "list[Optional[str]]":
@@ -80,6 +125,35 @@ def location_query_variants(location: Optional[str]) -> "list[Optional[str]]":
 
 def _normalize(value: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+def hierarchy_ids(
+    state: Optional[str],
+    district: Optional[str],
+    city: Optional[str],
+    locality: Optional[str],
+) -> dict[str, Optional[str]]:
+    """Build deterministic IDs for the resolved hierarchy.
+
+    These IDs are intentionally derived only from resolved components.  They
+    make records comparable within this application today and can later be
+    replaced by source-native administrative IDs without changing callers.
+    """
+    state_key = _normalize(_state_name(state) or state)
+    district_key = _normalize(canonical_district(district) or district)
+    city_key = _normalize(canonical_city(city) or city)
+    locality_key = _normalize(canonical_locality(locality, canonical_city(city)) or locality)
+
+    state_id = f"in.state.{state_key}" if state_key else None
+    district_id = f"{state_id}.district.{district_key}" if state_id and district_key else None
+    city_id = f"{district_id}.city.{city_key}" if district_id and city_key else None
+    location_id = f"{city_id}.locality.{locality_key}" if city_id and locality_key else city_id
+    return {
+        "state_id": state_id,
+        "district_id": district_id,
+        "city_id": city_id,
+        "location_id": location_id,
+    }
 
 
 def _similar(a: str, b: str) -> float:
@@ -109,6 +183,8 @@ def classify_location(
     company_state: Optional[str],
     company_address: Optional[str],
     requested: Optional[str],
+    company_district: Optional[str] = None,
+    company_locality: Optional[str] = None,
 ) -> "tuple[str, str]":
     """Generic hierarchy-aware match between a requested location and a company's.
 
@@ -134,7 +210,33 @@ def classify_location(
             return "match", f"company state '{actual_state}' matches requested state '{requested_state}'"
         return "outside", f"resolved state '{actual_state}' does not match requested state '{requested_state}'"
 
-    # Not a recognised state name - treat the request as a city/locality.
+    # A known district matches a company confirmed in that district, or a
+    # city whose trusted seed parent is that district.
+    requested_district = canonical_district(requested)
+    if requested_district:
+        actual_district = canonical_district(company_district)
+        if not actual_district and company_city:
+            actual_district = CITY_DISTRICTS.get(canonical_city(company_city) or company_city)
+        if actual_district:
+            if _normalize(actual_district) == _normalize(requested_district):
+                return "match", f"company district '{actual_district}' matches requested district '{requested_district}'"
+            return "outside", f"resolved district '{actual_district}' does not match requested district '{requested_district}'"
+        return "unknown", "company district could not be determined"
+
+    # A known locality is more specific than a city.  A city-level record is
+    # insufficient to confirm it, but an explicitly different locality in the
+    # same city is reliable conflicting evidence.
+    requested_locality = canonical_locality(requested)
+    if requested_locality:
+        actual_city = canonical_city(company_city)
+        actual_locality = canonical_locality(company_locality, actual_city) or canonical_locality(company_address, actual_city)
+        if actual_locality:
+            if _normalize(actual_locality) == _normalize(requested_locality):
+                return "match", f"company locality '{actual_locality}' matches requested locality '{requested_locality}'"
+            return "outside", f"resolved locality '{actual_locality}' does not match requested locality '{requested_locality}'"
+        return "unknown", "company locality could not be determined"
+
+    # Not a recognised state, district, or locality - treat the request as a city.
     requested_canonical = canonical_city(requested) or _normalize(requested)
     if company_city:
         actual_canonical = canonical_city(company_city) or _normalize(company_city)
