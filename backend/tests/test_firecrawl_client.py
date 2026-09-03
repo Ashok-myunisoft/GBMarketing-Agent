@@ -103,6 +103,7 @@ class FirecrawlClientSearchTests(unittest.TestCase):
 
     def setUp(self):
         firecrawl_client_module._GLOBAL_CACHE.clear()
+        firecrawl_client_module._CLOUD_SEARCH_PAUSED_UNTIL = 0.0
 
     @patch("services.gst_turnover_enrichment.firecrawl_client.FirecrawlCloudSearchClient")
     def test_search_uses_cloud_client_not_self_hosted_sdk(self, mock_cloud_cls):
@@ -157,6 +158,17 @@ class FirecrawlClientSearchTests(unittest.TestCase):
             results = client.search("query")
 
         self.assertEqual(results, [])
+        self.assertEqual(mock_cloud_cls.return_value.search.call_count, 1)
+
+    @patch("services.gst_turnover_enrichment.firecrawl_client.FirecrawlCloudSearchClient")
+    def test_quota_failure_pauses_later_cloud_searches(self, mock_cloud_cls):
+        mock_cloud_cls.return_value.is_configured = True
+        mock_cloud_cls.return_value.search.side_effect = FirecrawlCloudSearchError("http_402", retryable=False)
+
+        client = FirecrawlClient(api_key="fc-no-credit", api_url="")
+        self.assertEqual(client.search("first query"), [])
+        self.assertEqual(client.search("later query"), [])
+
         self.assertEqual(mock_cloud_cls.return_value.search.call_count, 1)
 
     @patch("services.gst_turnover_enrichment.firecrawl_client.FirecrawlCloudSearchClient")

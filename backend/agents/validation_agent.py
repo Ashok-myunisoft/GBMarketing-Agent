@@ -156,6 +156,7 @@ class ValidationAgent(BaseClass):
                     "remarks": "; ".join(note for note in (company.remarks, "; ".join(notes)) if note),
                 })
                 kept.append(accepted)
+                existing_keys.update(keys)
                 # This is the point the existing workflow treats a lead as
                 # actually accepted (not merely discovered) - the correct
                 # insertion point for the persistent PostgreSQL baseline.

@@ -24,6 +24,12 @@ from services.gst_turnover_enrichment.firecrawl_cloud_search import (
 
 logger = logging.getLogger(__name__)
 
+# Shared across isolated enrichment workers.  A quota error cannot be fixed by
+# retrying a different query, so this prevents a 50-company job from flooding
+# Firecrawl with identical HTTP 402 failures.
+_CLOUD_SEARCH_BREAKER_LOCK = threading.Lock()
+_CLOUD_SEARCH_PAUSED_UNTIL = 0.0
+
 
 # ============================================================
 # ERROR TYPES
@@ -607,6 +613,8 @@ class FirecrawlClient:
         result list so a single company's GST/turnover lookup can never stop
         the rest of the batch.
         """
+        global _CLOUD_SEARCH_PAUSED_UNTIL
+
         if not query or not query.strip():
             return []
 
@@ -622,9 +630,23 @@ class FirecrawlClient:
         for attempt in range(max_retries + 1):
             try:
                 with _FIRECRAWL_SEMAPHORE:
+                    with _CLOUD_SEARCH_BREAKER_LOCK:
+                        paused = time.monotonic() < _CLOUD_SEARCH_PAUSED_UNTIL
+                    if paused:
+                        logger.info(
+                            "[FIRECRAWL_SEARCH] company=%s query=%s status=skipped reason=quota_cooldown",
+                            company or "", query,
+                        )
+                        return []
                     _wait_for_rate_slot()
                     cloud_results = self._cloud_search.search(query, limit=limit)
             except FirecrawlCloudSearchError as ex:
+                if ex.reason == "http_402":
+                    with _CLOUD_SEARCH_BREAKER_LOCK:
+                        _CLOUD_SEARCH_PAUSED_UNTIL = max(
+                            _CLOUD_SEARCH_PAUSED_UNTIL,
+                            time.monotonic() + settings.FIRECRAWL_SEARCH_QUOTA_COOLDOWN_SECONDS,
+                        )
                 if ex.retryable and attempt < max_retries:
                     logger.info(
                         "[FIRECRAWL_SEARCH] company=%s query=%s status=retrying attempt=%d reason=%s",

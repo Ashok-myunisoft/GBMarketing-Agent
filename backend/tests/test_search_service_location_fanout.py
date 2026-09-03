@@ -37,17 +37,16 @@ class SearchServiceLocationFanoutTests(unittest.TestCase):
         service, stub_provider = self._service_with_stub_providers()
         service.search(SearchRequest(industry="Valve", location="Dubai"))
 
-        self.assertEqual(stub_provider.search.call_count, 1)
-        self.assertEqual(stub_provider.search.call_args.args[0].location, "Dubai")
+        self.assertEqual(stub_provider.search.call_count, len(service._location_variants_for("Dubai")))
+        queried_locations = [call.args[0].location for call in stub_provider.search.call_args_list]
+        self.assertEqual(queried_locations[0], "Dubai")
 
     @patch("services.search_services.search_industry_queries", return_value=["Valve"])
     def test_seeded_city_fans_out_once_per_known_locality(self, _industries):
         service, stub_provider = self._service_with_stub_providers()
         service.search(SearchRequest(industry="Valve", location="Coimbatore"))
 
-        # One call for the city itself, plus one per seeded locality.
-        from config.geography import CITY_LOCALITIES
-        expected_calls = 1 + len(CITY_LOCALITIES["Coimbatore"])
+        expected_calls = len(service._location_variants_for("Coimbatore"))
         self.assertEqual(stub_provider.search.call_count, expected_calls)
 
         queried_locations = {call.args[0].location for call in stub_provider.search.call_args_list}
@@ -55,18 +54,18 @@ class SearchServiceLocationFanoutTests(unittest.TestCase):
         self.assertIn("Peelamedu, Coimbatore", queried_locations)
 
     @patch("services.search_services.search_industry_queries", return_value=["Valve"])
-    def test_results_across_location_variants_are_merged_and_deduplicated(self, _industries):
+    def test_results_across_location_variants_are_returned_without_search_deduplication(self, _industries):
         service, stub_provider = self._service_with_stub_providers()
-        # Every query variant "finds" the same company - a real scenario
-        # when a business is well-ranked for both the city and one of its
-        # localities - so the final list must still contain it once.
+        # Search forwards every provider/query result. Validation owns all
+        # duplicate removal later in the workflow.
         stub_provider.search.return_value = [
             Company(company_name="Ambica Electro Control", website="https://ambica.example")
         ]
 
         results = service.search(SearchRequest(industry="Valve", location="Coimbatore"))
 
-        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results), stub_provider.search.call_count)
+        self.assertEqual(service.last_run_stats["removed"], [])
         self.assertGreater(stub_provider.search.call_count, 1)
 
     @patch("services.search_services.search_industry_queries", return_value=["Valve"])

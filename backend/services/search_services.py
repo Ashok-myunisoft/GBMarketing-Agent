@@ -4,7 +4,6 @@ from typing import List, Optional
 from schemas.company import Company
 from schemas.search_request import SearchRequest
 
-from providers.google_search_provider import GoogleSearchProvider
 from providers.google_maps_provider import GoogleMapsProvider
 from providers.business_directory_provider import BusinessDirectoryProvider
 from config.geography import canonical_city, location_query_variants
@@ -22,7 +21,6 @@ class SearchService:
     def __init__(self, locality_service: Optional[GeoapifyLocalityService] = None):
 
         self.providers = [
-            GoogleSearchProvider(),
             GoogleMapsProvider(),
             BusinessDirectoryProvider()
         ]
@@ -58,24 +56,22 @@ class SearchService:
         # The city is the broadest, highest-value query.  Only search a
         # locality when it is actually needed to reach the desired lead count.
         search_location(primary_location)
-        companies, removed = self._remove_duplicates(all_companies)
         for locality in fallback_locations:
-            if len(companies) >= request.max_results:
+            if len(all_companies) >= request.max_results:
                 break
             search_location(locality)
-            companies, removed = self._remove_duplicates(all_companies)
 
         self.last_run_stats = {
             "raw_fetched": len(all_companies),
-            "after_dedup": len(companies),
-            "removed": removed,
+            "after_dedup": len(all_companies),
+            "removed": [],
         }
 
-        print(f"\nTotal Companies : {len(companies)}")
+        print(f"\nTotal Companies : {len(all_companies)}")
 
         print("========== Search Service Completed ==========\n")
 
-        return companies[:request.max_results]
+        return all_companies[:request.max_results]
 
     def _search_requests(self, query_requests: List[SearchRequest]) -> List[Company]:
         """Run a small city/locality batch across providers in parallel."""
@@ -146,8 +142,8 @@ class SearchService:
         stopping it once after the last means every individual
         `provider.search()` call below sees the browser already running
         and reuses it, instead of each call launching and tearing down
-        its own browser process. Providers with no `_browser` (e.g. the
-        Tavily-backed GoogleSearchProvider) are unaffected.
+        its own browser process. Providers with no `_browser` are
+        unaffected.
         """
 
         browser = getattr(provider, "_browser", None)
@@ -183,32 +179,3 @@ class SearchService:
             if owns_lifecycle:
                 browser.stop()
 
-    def _remove_duplicates(
-        self,
-        companies: List[Company]
-    ) -> "tuple[List[Company], List[dict]]":
-        """
-        Remove duplicate companies based on company name + website, and
-        report the specific ones dropped (e.g. the same business found by
-        both GoogleMapsProvider and BusinessDirectoryProvider).
-        """
-
-        unique = {}
-        removed: List[dict] = []
-
-        for company in companies:
-
-            key = (
-                (company.company_name or "").strip().lower(),
-                (company.website or "").strip().lower()
-            )
-
-            if key not in unique:
-                unique[key] = company
-            else:
-                removed.append({
-                    "company_name": company.company_name or "(unnamed)",
-                    "reason": "duplicate result for the same company found by another provider/query",
-                })
-
-        return list(unique.values()), removed

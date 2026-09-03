@@ -22,6 +22,5 @@ class SearchRequest(BaseModel):
     # independently and inspected/filtered individually downstream.
     keywords: List[str] = Field(default_factory=list)
 
-    # A practical default keeps ordinary requests fast.  Explicit larger
-    # requests remain supported by the planner.
-    max_results: int = 50
+    # Return up to 1000 results unless the caller requests fewer.
+    max_results: int = 1000

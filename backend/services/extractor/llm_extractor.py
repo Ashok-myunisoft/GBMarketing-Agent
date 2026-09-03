@@ -24,6 +24,7 @@ import logging
 import re
 from typing import Any, Optional
 
+from core.config import settings
 from services.extractor.schema import ExtractedCompanyRecord
 from services.llm_services import LLMService
 from services.prompt_service import PromptService
@@ -51,12 +52,13 @@ def extract(document: str, company_name: str) -> ExtractedCompanyRecord:
         return ExtractedCompanyRecord()
 
     try:
+        document = _fit_document_to_prompt_budget(document)
         system_prompt = PromptService.load("company_extraction")
         response = LLMService().invoke(
             system_prompt=system_prompt,
             user_prompt=_build_user_prompt(company_name, document),
             temperature=0.0,
-            max_tokens=1500,
+            max_tokens=settings.LLM_EXTRACTION_MAX_TOKENS,
         )
         payload = _parse_json(response)
     except Exception as ex:
@@ -115,6 +117,28 @@ def _normalize(text: str) -> str:
 
 def _build_user_prompt(company_name: str, document: str) -> str:
     return f"Company: {company_name}\n\nDocument:\n{document}"
+
+
+def _fit_document_to_prompt_budget(document: str) -> str:
+    """Keep both the start and end of a crawl corpus within the LLM budget.
+
+    Page titles and official details tend to be near the start while contact
+    details are often at the end.  Retaining both is more useful than a blunt
+    prefix truncation and bounds the request sent to the GPU worker.
+    """
+    limit = settings.LLM_EXTRACTION_MAX_DOCUMENT_CHARS
+    if len(document) <= limit:
+        return document
+
+    omission_marker = "\n\n[... middle of source corpus omitted for model capacity ...]\n\n"
+    source_budget = max(1, limit - len(omission_marker))
+    head_length = (source_budget * 2) // 3
+    tail_length = source_budget - head_length
+    return (
+        document[:head_length]
+        + omission_marker
+        + document[-tail_length:]
+    )
 
 
 def _parse_json(response: str) -> Any:

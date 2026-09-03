@@ -3,11 +3,12 @@
 import logging
 import re
 from typing import Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 from core.config import settings
 from services.browser_service import BrowserService
 from services.gst_turnover_enrichment import ai_validator, confidence
+from services.gst_turnover_enrichment.crawl4ai_client import Crawl4AIClient
 from services.gst_turnover_enrichment.firecrawl_client import FirecrawlClient, FirecrawlSearchResult
 from services.gst_turnover_enrichment.gst_extraction import find_valid_gstins
 from services.gst_turnover_enrichment.models import FieldResult, GstTurnoverResult, SourceCandidate
@@ -15,6 +16,20 @@ from services.gst_turnover_enrichment.turnover_extraction import find_turnover_c
 
 logger = logging.getLogger(__name__)
 _LOG_TAG = {"GST Number": "GST", "Turnover": "TURNOVER"}
+
+
+def _duckduckgo_search_url(query: str) -> str:
+    """DuckDuckGo's no-JS HTML endpoint, crawled directly by Crawl4AI using
+    the exact same per-field queries Firecrawl already builds (_queries),
+    when neither Firecrawl nor a known-website crawl found a value.
+
+    Google was deliberately not chosen here: this codebase already hit
+    Google's automated-browser blocking once (the removed
+    GstEnrichmentService's ``last_blocked`` handling) - part of why this
+    project moved to API-based search in the first place. DuckDuckGo's HTML
+    endpoint needs no JS and tolerates automated fetches far better.
+    """
+    return f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
 
 
 def _normalize_result_url(url: str) -> str:
@@ -30,11 +45,14 @@ def _normalize_result_url(url: str) -> str:
 class GstTurnoverEnrichmentService:
     """Searches Firecrawl using a company name; it never scrapes its website."""
 
-    def __init__(self, browser: BrowserService, firecrawl: FirecrawlClient):
+    def __init__(self, browser: BrowserService, firecrawl: FirecrawlClient, crawl4ai: Optional[Crawl4AIClient] = None):
         # ``browser`` remains an injected argument for compatibility with the
         # existing EnrichmentAgent construction; it is deliberately unused.
         self._browser = browser
         self._firecrawl = firecrawl
+        # Fallback only - see _crawl4ai_fallback. Never used while Firecrawl
+        # Search already resolved a field.
+        self._crawl4ai = crawl4ai or Crawl4AIClient()
 
     def resolve(
         self, company_name: str, website: Optional[str] = None, gst: Optional[str] = None,
@@ -42,10 +60,10 @@ class GstTurnoverEnrichmentService:
     ) -> GstTurnoverResult:
         """Resolve fields independently from Firecrawl Search result content.
 
-        ``website`` is accepted solely to preserve the existing call contract.
-        It is never read or supplied to Firecrawl in this GST/turnover path.
+        Firecrawl is always tried first. ``website``, previously unused here,
+        is now read only as the Crawl4AI fallback target for whichever field
+        (GST, turnover, or both) Firecrawl could not resolve.
         """
-        del website
         gst_candidates = self._search_field(company_name, "gst", city, state, industry) if not gst else []
         turnover_candidates = (
             self._search_field(company_name, "turnover", city, state, industry)
@@ -53,7 +71,85 @@ class GstTurnoverEnrichmentService:
         )
         gst_result = self._resolve_field("GST Number", company_name, gst_candidates, confidence.GST_SOURCE_POINTS)
         turnover_result = self._resolve_field("Turnover", company_name, turnover_candidates, confidence.TURNOVER_SOURCE_POINTS)
+
+        if not gst and gst_result.status == "not_found":
+            gst_result = self._crawl4ai_fallback(
+                "GST Number", "gst", company_name, website, city, state, industry, confidence.GST_SOURCE_POINTS
+            ) or gst_result
+        if settings.ENRICHMENT_LOOKUP_TURNOVER and turnover_result.status == "not_found":
+            turnover_result = self._crawl4ai_fallback(
+                "Turnover", "turnover", company_name, website, city, state, industry, confidence.TURNOVER_SOURCE_POINTS
+            ) or turnover_result
+
         return GstTurnoverResult(gst=gst_result, turnover=turnover_result)
+
+    def _crawl4ai_fallback(
+        self, field_name: str, field: str, company_name: str, website: Optional[str],
+        city: Optional[str], state: Optional[str], industry: Optional[str], points_table: dict,
+    ) -> Optional[FieldResult]:
+        """Runs only when Firecrawl found nothing for this field: Firecrawl
+        request failed/errored/timed out/returned empty content, or its
+        content yielded no valid GSTIN/turnover.
+
+        Two tiers, cheapest first:
+          1. The company's own site, if already known - often sufficient on
+             its own and needs no extra network round trip beyond the crawl.
+          2. The same per-field queries Firecrawl already builds
+             (_queries), each crawled against DuckDuckGo's HTML search -
+             covers companies with no known website at all, which a
+             website-only fallback can never help.
+        Stops at the first tier/query that yields a value. Returns None
+        (keep the existing not_found result) whenever nothing usable comes
+        back from either tier - this can never fail the enrichment run."""
+        if not settings.CRAWL4AI_ENABLED:
+            return None
+        tag = _LOG_TAG[field_name]
+
+        if website:
+            candidates = self._crawl4ai_extract(company_name, field, website, "website", city, state, industry)
+            if candidates:
+                result = self._resolve_field(field_name, company_name, candidates, points_table)
+                logger.info("[%s] provider=crawl4ai tier=website company=%s url=%s status=%s",
+                            tag, company_name, website, result.status)
+                return result
+
+        for query in self._queries(company_name, field):
+            search_url = _duckduckgo_search_url(query)
+            candidates = self._crawl4ai_extract(company_name, field, search_url, "search", city, state, industry)
+            if candidates:
+                result = self._resolve_field(field_name, company_name, candidates, points_table)
+                logger.info("[%s] provider=crawl4ai tier=query_search company=%s query=%s status=%s",
+                            tag, company_name, query, result.status)
+                return result
+
+        logger.info("[%s] provider=crawl4ai company=%s status=not_found", tag, company_name)
+        return None
+
+    def _crawl4ai_extract(
+        self, company_name: str, field: str, url: str, source: str,
+        city: Optional[str], state: Optional[str], industry: Optional[str],
+    ) -> list[SourceCandidate]:
+        """Crawls one URL with Crawl4AI and runs it through the same
+        extraction functions the Firecrawl path uses. ``source`` records
+        which fallback tier produced the evidence ("website" or "search")
+        so confidence scoring weighs it the same way the Firecrawl path
+        already weighs those tiers."""
+        page = self._crawl4ai.crawl(url)
+        if not page.success or not page.content:
+            return []
+        if not self._matches_identity(company_name, page.content, city, state, industry):
+            return []
+
+        if field == "gst":
+            return [
+                SourceCandidate(value=value, source=source, source_url=url, source_type="crawl4ai_fallback")
+                for value in find_valid_gstins(page.content)
+            ]
+        return [
+            SourceCandidate(value=item["value"], source=source, source_url=url, currency=item["currency"],
+                             financial_year=item["financial_year"], metric=item["metric"], source_type="crawl4ai_fallback")
+            for item in find_turnover_candidates(page.content)
+        ]
 
     def _search_field(
         self, company_name: str, field: str, city: Optional[str], state: Optional[str], industry: Optional[str]

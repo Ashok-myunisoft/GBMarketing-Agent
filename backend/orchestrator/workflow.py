@@ -83,10 +83,7 @@ class WorkflowOrchestrator:
             after_search_dedup=stats.get("after_dedup", len(context.companies)),
             after_enrichment=len(context.companies),
             after_validation=len(context.companies),
-            removed=[
-                RemovedCompany(company_name=item["company_name"], stage="search_dedup", reason=item["reason"])
-                for item in stats.get("removed", [])
-            ],
+            removed=[],
         )
 
         return context

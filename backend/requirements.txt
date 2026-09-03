@@ -12,6 +12,7 @@ beautifulsoup4==4.15.0
 runpod
 httpx
 firecrawl-py==4.34.0
+crawl4ai
 
 # Excel export/validation and public-PDF GST extraction
 openpyxl==3.1.5

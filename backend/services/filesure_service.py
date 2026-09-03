@@ -1,5 +1,3 @@
-"""Authorized MCA company-data enrichment through FileSure."""
-
 import json
 import logging
 from dataclasses import dataclass

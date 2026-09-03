@@ -69,6 +69,13 @@ class Settings:
     TAVILY_MAX_PAGES = max(1, int(os.getenv("TAVILY_MAX_PAGES", "10")))
     TAVILY_MAX_PDFS = max(0, int(os.getenv("TAVILY_MAX_PDFS", "5")))
     TAVILY_MAX_DOCUMENT_CHARS = max(2_000, int(os.getenv("TAVILY_MAX_DOCUMENT_CHARS", "40000")))
+    # The RunPod worker has a 24 GB GPU.  Keep the prompt sent for structured
+    # extraction materially smaller than the crawl corpus so its KV cache does
+    # not turn one company lookup into an out-of-memory request.
+    LLM_EXTRACTION_MAX_DOCUMENT_CHARS = max(
+        2_000, int(os.getenv("LLM_EXTRACTION_MAX_DOCUMENT_CHARS", "12000"))
+    )
+    LLM_EXTRACTION_MAX_TOKENS = max(256, int(os.getenv("LLM_EXTRACTION_MAX_TOKENS", "1000")))
     ENRICHMENT_USE_TAVILY_PIPELINE = os.getenv("ENRICHMENT_USE_TAVILY_PIPELINE", "true").lower() == "true"
     ENRICHMENT_TAVILY_MIN_CONFIDENCE = int(os.getenv("ENRICHMENT_TAVILY_MIN_CONFIDENCE", "80"))
     ENRICHMENT_TAVILY_MAX_RETRIES = max(0, int(os.getenv("ENRICHMENT_TAVILY_MAX_RETRIES", "1")))
@@ -99,7 +106,19 @@ class Settings:
     MAX_FIRECRAWL_PAGES_PER_COMPANY = max(1, int(os.getenv("MAX_FIRECRAWL_PAGES_PER_COMPANY", "5")))
     FIRECRAWL_SEARCH_TIMEOUT_SECONDS = max(1, int(os.getenv("FIRECRAWL_SEARCH_TIMEOUT_SECONDS", "30")))
     FIRECRAWL_SEARCH_MAX_RETRIES = max(0, int(os.getenv("FIRECRAWL_SEARCH_MAX_RETRIES", "1")))
-    
+    # HTTP 402 means the Cloud Search account has no usable credits.  Pause
+    # that provider briefly instead of issuing the same billable-failure
+    # request for every remaining company in a batch.
+    FIRECRAWL_SEARCH_QUOTA_COOLDOWN_SECONDS = max(
+        1, int(os.getenv("FIRECRAWL_SEARCH_QUOTA_COOLDOWN_SECONDS", "300"))
+    )
+
+    # Crawl4AI is a fallback for GST/turnover only, used when Firecrawl fails,
+    # errors, times out, or returns content the existing GST/turnover
+    # extraction can't find a value in. Firecrawl always remains primary.
+    CRAWL4AI_ENABLED = os.getenv("CRAWL4AI_ENABLED", "true").lower() == "true"
+    CRAWL4AI_TIMEOUT_SECONDS = max(1, int(os.getenv("CRAWL4AI_TIMEOUT_SECONDS", "30")))
+
 
     DATABASE_URL = os.getenv("DATABASE_URL")
 

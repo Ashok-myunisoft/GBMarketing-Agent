@@ -8,8 +8,8 @@ class RemovedCompany(BaseModel):
     """One company that didn't make it into the final results, and why."""
 
     company_name: str
-    # Pipeline stage that dropped it: "search_dedup" (duplicate across
-    # providers) or "validation" (duplicate/out-of-area/ICP rejection).
+    # Pipeline stage that dropped it: "validation" (duplicate/out-of-area/
+    # ICP rejection).
     stage: str
     reason: str
 
@@ -17,10 +17,9 @@ class RemovedCompany(BaseModel):
 class PipelineStats(BaseModel):
     """Company counts at each real stage of the pipeline, for answering
     "how many did we start with, and why did we end up with fewer" without
-    re-running the job. Only search and validation actually change the
-    company count (enrichment fills in fields on the same list, see
-    orchestrator/workflow.py), so those are the two after_* counts that can
-    differ from after_search_dedup.
+    re-running the job. Validation is the stage that removes companies;
+    enrichment fills in fields on the same list (see
+    orchestrator/workflow.py).
     """
 
     raw_fetched: int = 0
