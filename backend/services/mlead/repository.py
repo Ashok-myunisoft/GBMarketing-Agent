@@ -22,6 +22,7 @@ Field mapping (public.mlead -> Company):
     alternate_mobile_number    -> phone_alt
     email_id                    -> email
     city                      -> city
+    address                  -> address
     industry_type              -> industry
     region                    -> region
     contact_person              -> contact_person
@@ -110,7 +111,7 @@ class MleadRepository:
                 cur.execute(
                     """
                     SELECT lead_id, company_name, gst, turn_over, region, city,
-                           industry_type, contact_person, designation,
+                           address, industry_type, contact_person, designation,
                            mobile_number, alternate_mobile_number, email_id,
                            linkedin_id, website_url, remarks
                     FROM public.mlead
@@ -130,6 +131,7 @@ class MleadRepository:
             turnover=str(turn_over) if turn_over is not None else None,
             region=row.get("region"),
             city=row.get("city"),
+            address=row.get("address"),
             industry=row.get("industry_type"),
             contact_person=row.get("contact_person"),
             designation=row.get("designation"),
@@ -154,6 +156,7 @@ class MleadRepository:
         alternate_mobile_number: Optional[str] = None,
         email_id: Optional[str] = None,
         city: Optional[str] = None,
+        address: Optional[str] = None,
         industry_type: Optional[str] = None,
         region: Optional[str] = None,
         contact_person: Optional[str] = None,
@@ -178,10 +181,10 @@ class MleadRepository:
                     """
                     INSERT INTO public.mlead
                         (company_name, gst, website_url, mobile_number,
-                         alternate_mobile_number, email_id, city,
+                         alternate_mobile_number, email_id, city, address,
                          industry_type, region, contact_person, designation,
                          remarks)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING lead_id;
                     """,
                     (
@@ -192,6 +195,7 @@ class MleadRepository:
                         alternate_mobile_number,
                         email_id,
                         city,
+                        address,
                         industry_type,
                         region,
                         contact_person,

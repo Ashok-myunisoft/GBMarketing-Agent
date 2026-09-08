@@ -2,6 +2,7 @@
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from urllib.parse import quote_plus, urlsplit, urlunsplit
 
@@ -63,25 +64,51 @@ class GstTurnoverEnrichmentService:
         Firecrawl is always tried first. ``website``, previously unused here,
         is now read only as the Crawl4AI fallback target for whichever field
         (GST, turnover, or both) Firecrawl could not resolve.
-        """
-        gst_candidates = self._search_field(company_name, "gst", city, state, industry) if not gst else []
-        turnover_candidates = (
-            self._search_field(company_name, "turnover", city, state, industry)
-            if settings.ENRICHMENT_LOOKUP_TURNOVER else []
-        )
-        gst_result = self._resolve_field("GST Number", company_name, gst_candidates, confidence.GST_SOURCE_POINTS)
-        turnover_result = self._resolve_field("Turnover", company_name, turnover_candidates, confidence.TURNOVER_SOURCE_POINTS)
 
-        if not gst and gst_result.status == "not_found":
-            gst_result = self._crawl4ai_fallback(
-                "GST Number", "gst", company_name, website, city, state, industry, confidence.GST_SOURCE_POINTS
-            ) or gst_result
-        if settings.ENRICHMENT_LOOKUP_TURNOVER and turnover_result.status == "not_found":
-            turnover_result = self._crawl4ai_fallback(
-                "Turnover", "turnover", company_name, website, city, state, industry, confidence.TURNOVER_SOURCE_POINTS
-            ) or turnover_result
+        The two fields' full search->resolve->fallback chains run
+        concurrently rather than one after the other: both go through
+        FirecrawlClient's plain HTTP calls (thread-safe: its own rate
+        limiter/semaphore/cache all use locks) and, on fallback,
+        Crawl4AIClient (a fresh self-contained browser per call, never a
+        shared one) - unlike EnrichmentAgent's own Playwright browser, there
+        is no single shared browser instance here for two threads to
+        conflict over. Both fields still ultimately queue behind the same
+        global Firecrawl rate limit, but no longer wait for each other's
+        non-network work (ranking, scoring, the AI validation call) in
+        between - this alone doesn't reduce the number of Firecrawl calls a
+        "not found" company costs, only the wall-clock time to make them.
+        """
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gst-turnover-field") as executor:
+            gst_future = None if gst else executor.submit(
+                self._resolve_one_field, "GST Number", "gst", company_name, website, city, state, industry
+            )
+            turnover_future = executor.submit(
+                self._resolve_one_field, "Turnover", "turnover", company_name, website, city, state, industry
+            ) if settings.ENRICHMENT_LOOKUP_TURNOVER else None
+
+            gst_result = gst_future.result() if gst_future else FieldResult(status="not_found")
+            turnover_result = turnover_future.result() if turnover_future else FieldResult(status="not_found")
 
         return GstTurnoverResult(gst=gst_result, turnover=turnover_result)
+
+    def _resolve_one_field(
+        self, field_name: str, field: str, company_name: str, website: Optional[str],
+        city: Optional[str], state: Optional[str], industry: Optional[str],
+    ) -> FieldResult:
+        """One field's complete search -> resolve -> Crawl4AI-fallback chain.
+
+        Only ever called (via resolve()) for a field that actually needs
+        resolving - the "already known"/"turnover lookup disabled" skips
+        stay in resolve() itself, not here.
+        """
+        points_table = confidence.GST_SOURCE_POINTS if field == "gst" else confidence.TURNOVER_SOURCE_POINTS
+        candidates = self._search_field(company_name, field, city, state, industry)
+        result = self._resolve_field(field_name, company_name, candidates, points_table)
+        if result.status == "not_found":
+            result = self._crawl4ai_fallback(
+                field_name, field, company_name, website, city, state, industry, points_table
+            ) or result
+        return result
 
     def _crawl4ai_fallback(
         self, field_name: str, field: str, company_name: str, website: Optional[str],

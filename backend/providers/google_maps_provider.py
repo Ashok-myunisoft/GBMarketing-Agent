@@ -4,6 +4,7 @@ from urllib.parse import quote_plus
 
 from playwright.sync_api import Locator, Page
 
+from config.geography import classify_location
 from providers.base_provider import BaseProvider
 from schemas.company import Company
 from schemas.search_request import SearchRequest
@@ -75,7 +76,9 @@ class GoogleMapsProvider(BaseProvider):
 
                 self._load_results(page, max_results=request.max_results)
 
-                companies = self._extract_companies(page, max_results=request.max_results)
+                companies = self._extract_companies(
+                    page, max_results=request.max_results, requested_location=request.location
+                )
 
                 print(f"Maps Results : {len(companies)}")
 
@@ -137,7 +140,9 @@ class GoogleMapsProvider(BaseProvider):
 
             previous_count = current_count
 
-    def _extract_companies(self, page: Page, max_results: int) -> List[Company]:
+    def _extract_companies(
+        self, page: Page, max_results: int, requested_location: Optional[str] = None
+    ) -> List[Company]:
 
         result_links = page.locator(RESULT_LINK_SELECTOR)
         total = result_links.count()
@@ -162,6 +167,9 @@ class GoogleMapsProvider(BaseProvider):
                 logger.warning("Skipping unparsable Maps result at index %d: %s", i, ex)
                 continue
 
+            if not self._is_within_requested_location(company, requested_location):
+                continue
+
             normalized_name = company.company_name.strip().lower()
             existing = by_name.get(normalized_name)
 
@@ -169,6 +177,32 @@ class GoogleMapsProvider(BaseProvider):
                 by_name[normalized_name] = company
 
         return list(by_name.values())[:max_results]
+
+    @staticmethod
+    def _is_within_requested_location(company: Company, requested_location: Optional[str]) -> bool:
+        """Drops a result only on confirmed conflicting evidence.
+
+        Maps itself decides how far to search, and pads a sparse local
+        result set with listings from a wider area (verified by hand: a
+        niche category query for one city can surface a result whose
+        address plainly names a different city). Nothing upstream
+        constrains that, so this checks each result here using the same
+        address-based evidence ValidationAgent's classify_location already
+        trusts - it only ever discards on a *confirmed different* known
+        city/locality, never merely because the address is missing or
+        doesn't mention the requested place (that stays "unknown", kept,
+        and left for ValidationAgent to flag as unverified).
+        """
+        if not requested_location:
+            return True
+        decision, reason = classify_location(None, None, company.address, requested_location)
+        if decision == "outside":
+            logger.info(
+                "Dropping Maps result '%s' outside requested '%s': %s",
+                company.company_name, requested_location, reason,
+            )
+            return False
+        return True
 
     def _parse_card(self, card: Locator) -> Company:
 

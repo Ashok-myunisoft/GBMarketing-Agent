@@ -94,6 +94,23 @@ def canonical_locality(value: Optional[str], city: Optional[str] = None) -> Opti
     return matches[0] if len(set(matches)) == 1 else None
 
 
+def city_for_locality(locality: Optional[str]) -> Optional[str]:
+    """Returns the seeded parent city for a known CITY_LOCALITIES entry.
+
+    Lets a company whose city couldn't be resolved directly (no website, a
+    Maps address too vague to geocode) still get a real city - and therefore
+    pass through classify_location's district/city checks instead of falling
+    through to its much weaker address-substring fallback - whenever a
+    locality alone was enough to identify it unambiguously.
+    """
+    if not locality:
+        return None
+    return next(
+        (city for city, localities in CITY_LOCALITIES.items() if locality in localities),
+        None,
+    )
+
+
 def canonical_district(value: Optional[str]) -> Optional[str]:
     """Resolve one of the districts represented by the trusted seed data."""
     text = (value or "").lower()
@@ -217,6 +234,17 @@ def classify_location(
         actual_district = canonical_district(company_district)
         if not actual_district and company_city:
             actual_district = CITY_DISTRICTS.get(canonical_city(company_city) or company_city)
+        if not actual_district:
+            # No structured city either - fall back to whatever city/locality
+            # the free-text address itself names, same reasoning as the
+            # unstructured-address fallback below: a *different* known place
+            # actually named in the address is real conflicting evidence, not
+            # just an absence of the requested one.
+            address_city = canonical_city(company_address)
+            if not address_city:
+                address_city = city_for_locality(canonical_locality(company_address))
+            if address_city:
+                actual_district = CITY_DISTRICTS.get(address_city)
         if actual_district:
             if _normalize(actual_district) == _normalize(requested_district):
                 return "match", f"company district '{actual_district}' matches requested district '{requested_district}'"
@@ -256,10 +284,32 @@ def classify_location(
         return "outside", f"resolved city '{company_city}' does not match requested city '{requested}'"
 
     # No structured city - only the unstructured address is available, which is
-    # too noisy to ever assert "outside" from; a miss just means "unknown".
+    # too noisy to ever assert "outside" from an absence; but a *different*,
+    # confidently-identified city or locality actually named in the address is
+    # real conflicting evidence (e.g. a Chennai listing surfaced by a loosely
+    # geo-scoped Coimbatore search) - only known seeded names are trusted for
+    # this, never an arbitrary substring, so this can't misfire on a city this
+    # codebase has no reference data for.
     normalized_address = _normalize(company_address)
     if normalized_address and requested_canonical in normalized_address:
         return "match", f"requested '{requested}' found in company address"
+
+    address_city = canonical_city(company_address)
+    if address_city and _normalize(address_city) != requested_canonical:
+        return "outside", f"address names '{address_city}', not requested '{requested}'"
+
+    address_locality = canonical_locality(company_address)
+    if address_locality:
+        locality_city = next(
+            (city for city, localities in CITY_LOCALITIES.items() if address_locality in localities),
+            None,
+        )
+        if locality_city and _normalize(locality_city) != requested_canonical:
+            return "outside", (
+                f"address names locality '{address_locality}' (in {locality_city}), "
+                f"not requested '{requested}'"
+            )
+
     return "unknown", "company city could not be determined"
 
 

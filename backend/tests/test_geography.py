@@ -1,6 +1,12 @@
 import unittest
 
-from config.geography import CITY_LOCALITIES, classify_location, hierarchy_ids, location_query_variants
+from config.geography import (
+    CITY_LOCALITIES,
+    city_for_locality,
+    classify_location,
+    hierarchy_ids,
+    location_query_variants,
+)
 
 
 class ClassifyLocationTests(unittest.TestCase):
@@ -97,6 +103,54 @@ class ClassifyLocationTests(unittest.TestCase):
             "Chennai", "Tamil Nadu", None, "Ambattur", company_locality="Guindy",
         )
         self.assertEqual(decision, "outside")
+
+    def test_unstructured_address_naming_a_different_known_city_is_outside(self):
+        # A Chennai listing surfaced by a loosely geo-scoped Coimbatore
+        # search, with no structured city/state resolved at all - the
+        # address itself is the only signal, and it names a different
+        # known city.
+        decision, reason = classify_location(
+            None, None, "12 GST Road, Chennai, Tamil Nadu", "Coimbatore",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Chennai", reason)
+
+    def test_unstructured_address_naming_a_different_known_locality_is_outside(self):
+        # Same leak, but the address never spells out "Chennai" at all -
+        # only a locality that is unambiguously a Chennai area. Coimbatore
+        # doubles as both a city and a district name in the seed data, so
+        # this is actually caught by the district branch (its resolved
+        # district is Ambattur's parent city, Chennai) rather than the
+        # plain-city fallback - either way, the leak is closed.
+        decision, reason = classify_location(
+            None, None, "14 Anna Nagar West, Ambattur", "Coimbatore",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Chennai", reason)
+
+    def test_unstructured_address_with_no_known_city_or_locality_stays_unknown(self):
+        decision, _ = classify_location(None, None, "Plot 4, Industrial Estate", "Coimbatore")
+        self.assertEqual(decision, "unknown")
+
+    def test_unstructured_address_leak_caught_via_plain_city_branch_too(self):
+        # "Bengaluru" (unlike "Coimbatore"/"Chennai") isn't itself a seeded
+        # district name, so this exercises the plain-city fallback rather
+        # than the district branch - same leak, same fix, different code path.
+        decision, reason = classify_location(
+            None, None, "12 GST Road, Chennai, Tamil Nadu", "Bengaluru",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Chennai", reason)
+
+
+class CityForLocalityTests(unittest.TestCase):
+    def test_known_locality_resolves_to_its_seeded_parent_city(self):
+        self.assertEqual(city_for_locality("Ambattur"), "Chennai")
+        self.assertEqual(city_for_locality("Peelamedu"), "Coimbatore")
+
+    def test_unknown_locality_resolves_to_none(self):
+        self.assertIsNone(city_for_locality("Nowhereville"))
+        self.assertIsNone(city_for_locality(None))
 
 
 class LocationQueryVariantsTests(unittest.TestCase):

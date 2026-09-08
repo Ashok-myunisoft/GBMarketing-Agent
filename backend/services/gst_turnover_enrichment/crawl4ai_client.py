@@ -32,8 +32,12 @@ class Crawl4AIPage:
 class Crawl4AIClient:
     """Thin, defensive wrapper around Crawl4AI's async crawler."""
 
-    def crawl(self, url: str) -> Crawl4AIPage:
-        """Fetch one URL through Crawl4AI, rendering JavaScript. Never raises."""
+    def crawl(self, url: str, js_code: str = None) -> Crawl4AIPage:
+        """Fetch one URL through Crawl4AI, rendering JavaScript. Never raises.
+
+        ``js_code``, when given, runs in the page after it loads and before
+        content is captured - needed for pages that gate a value behind a
+        reveal click (see GstTurnoverService's Crawl4AI fallback)."""
         if not url or not url.strip():
             return Crawl4AIPage(url=url or "", error="Empty URL")
 
@@ -43,20 +47,20 @@ class Crawl4AIClient:
             # short-lived loop in a worker thread when necessary.
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self._crawl_async(url))
+            return asyncio.run(self._crawl_async(url, js_code))
 
         try:
-            return self._crawl_in_worker_thread(url)
+            return self._crawl_in_worker_thread(url, js_code)
         except Exception as ex:
             logger.warning("[CRAWL4AI] url=%s status=failed reason=%s", url, ex)
             return Crawl4AIPage(url=url, error=str(ex))
 
-    def _crawl_in_worker_thread(self, url: str) -> Crawl4AIPage:
+    def _crawl_in_worker_thread(self, url: str, js_code: str = None) -> Crawl4AIPage:
         result_queue: "queue.Queue[object]" = queue.Queue(maxsize=1)
 
         def run() -> None:
             try:
-                result_queue.put(asyncio.run(self._crawl_async(url)))
+                result_queue.put(asyncio.run(self._crawl_async(url, js_code)))
             except BaseException as ex:  # surfaced in the calling thread below
                 result_queue.put(ex)
 
@@ -72,7 +76,7 @@ class Crawl4AIClient:
             raise result
         return result  # type: ignore[return-value]
 
-    async def _crawl_async(self, url: str) -> Crawl4AIPage:
+    async def _crawl_async(self, url: str, js_code: str = None) -> Crawl4AIPage:
         try:
             from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
         except ImportError as ex:
@@ -81,7 +85,12 @@ class Crawl4AIClient:
 
         timeout_seconds = settings.CRAWL4AI_TIMEOUT_SECONDS
         browser_config = BrowserConfig(headless=True, verbose=False)
-        run_config = CrawlerRunConfig(page_timeout=timeout_seconds * 1000)
+        run_config = CrawlerRunConfig(
+            page_timeout=timeout_seconds * 1000,
+            js_code=js_code,
+            # Let the click's DOM update settle before markdown is captured.
+            delay_before_return_html=1.0 if js_code else 0.1,
+        )
 
         try:
             async with AsyncWebCrawler(config=browser_config) as crawler:

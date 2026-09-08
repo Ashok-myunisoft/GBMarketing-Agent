@@ -15,6 +15,7 @@ from config.geography import (
     canonical_city,
     canonical_district,
     canonical_locality,
+    city_for_locality,
     hierarchy_ids,
     parse_address_components,
 )
@@ -27,8 +28,9 @@ from services.contact_extraction.page_classifier import classify as classify_pag
 from services.contact_extraction.pipeline import ContactExtractionPipeline
 from services.geocoding_service import GeoapifyGeocodingService
 from services.filesure_service import FileSureService
-from services.gst_turnover_service import GstTurnoverService
+from services.gst_turnover_service import GstTurnoverService, JAMKU_GSTIN_URL_TEMPLATE
 from services.gst_turnover_enrichment.service import GstTurnoverEnrichmentService
+from services.gst_turnover_enrichment.confidence import TURNOVER_SOURCE_POINTS
 from services.gst_turnover_enrichment.firecrawl_client import FirecrawlClient
 from services.gst_turnover_enrichment.gst_extraction import find_valid_gstin
 from services.enrichment.company_enrichment import CompanyTavilyEnrichmentService
@@ -122,13 +124,30 @@ class EnrichmentAgent(BaseClass):
         )
         self._geocoder = geocoder or GeoapifyGeocodingService()
         self._filesure = filesure or FileSureService()
-        # Retain the historical injection point without constructing legacy
-        # search services. Production resolution is self._gst_turnover.
-        self._turnover = turnover
+        # gst.jamku.app's Aggregate Turnover slab - the only source in this
+        # pipeline that reads real GST-filing-derived turnover data for
+        # private/SME companies rather than hoping a number is published in
+        # plain text somewhere. Used below only for whatever GST/turnover
+        # resolution still hasn't filled in.
+        self._turnover = turnover or GstTurnoverService(self._browser)
         # Plain HTTPS API, no Playwright involved - the sole content-fetch
         # mechanism for GST/turnover (see services/gst_turnover_enrichment).
         self._firecrawl = firecrawl or FirecrawlClient()
         self._gst_turnover = GstTurnoverEnrichmentService(self._browser, self._firecrawl)
+        # Tavily's gather() also drives a Playwright browser of its own for
+        # some of its page fetches (services/crawler/html_crawler.py), and
+        # Playwright's sync API only tolerates being driven from the single
+        # thread that started it. A *separate* BrowserService instance -
+        # never self._browser - lets gather() run concurrently with the
+        # website crawl below instead of adding to it, without two threads
+        # ever touching the same browser. Only constructed when this method
+        # is the one building the CompanyTavilyEnrichmentService itself; an
+        # injected `tavily_enrichment` (tests) owns its own browser choice.
+        self._tavily_browser = (
+            None if tavily_enrichment else BrowserService(
+                timeout_ms=settings.ENRICHMENT_PLAYWRIGHT_TIMEOUT_MS, max_retries=1,
+            )
+        )
         # Tavily search + HTML/PDF crawl + LLM structured extraction (see
         # services/enrichment/company_enrichment.py). A no-op whenever
         # TAVILY_API_KEY isn't configured, so this is safe to always
@@ -138,7 +157,7 @@ class EnrichmentAgent(BaseClass):
         # so PDF enrichment in the Tavily pass and GST/turnover enrichment
         # aren't independently rate-limited against the same Firecrawl
         # deployment.
-        self._tavily = tavily_enrichment or CompanyTavilyEnrichmentService(self._browser, firecrawl=self._firecrawl)
+        self._tavily = tavily_enrichment or CompanyTavilyEnrichmentService(self._tavily_browser, firecrawl=self._firecrawl)
         self._linkedin_context: Optional[BrowserContext] = None
         self._linkedin_authenticated = False
         self._linkedin_unavailable = False
@@ -147,6 +166,15 @@ class EnrichmentAgent(BaseClass):
         # pool in execute() so it doesn't compete with those for slots.
         self._filesure_executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="filesure-prefetch"
+        )
+        # Exactly one worker thread - not a pool - so every task submitted
+        # here (browser start, every gather() call, browser stop) always
+        # runs on that same single OS thread for this agent's whole
+        # lifetime, honoring the Playwright thread-affinity requirement
+        # above. Only started/used when self._tavily_browser exists.
+        self._tavily_executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="tavily-worker")
+            if self._tavily_browser is not None else None
         )
 
     def execute(self, companies: List[Company]) -> List[Company]:
@@ -194,6 +222,12 @@ class EnrichmentAgent(BaseClass):
         owns_lifecycle = not self._browser.is_running
         if owns_lifecycle:
             self._browser.start()
+        # Started/stopped via the same single-worker executor gather() itself
+        # runs on, so this browser's whole lifecycle - launch, every page
+        # fetch, shutdown - stays on the one thread Playwright requires.
+        tavily_owns_lifecycle = self._tavily_browser is not None and not self._tavily_browser.is_running
+        if tavily_owns_lifecycle:
+            self._tavily_executor.submit(self._tavily_browser.start).result()
         try:
             return [self._enrich(company) for company in companies]
         finally:
@@ -203,6 +237,10 @@ class EnrichmentAgent(BaseClass):
             if self._turnover is not None:
                 self._turnover.close()
             self._filesure_executor.shutdown(wait=False, cancel_futures=True)
+            if tavily_owns_lifecycle:
+                self._tavily_executor.submit(self._tavily_browser.stop).result()
+            if self._tavily_executor is not None:
+                self._tavily_executor.shutdown(wait=False, cancel_futures=True)
             if owns_lifecycle:
                 self._browser.stop()
 
@@ -263,8 +301,23 @@ class EnrichmentAgent(BaseClass):
         # output is never applied directly - it only feeds candidates into
         # the same GST/turnover/contact scoring machinery below, and fills
         # whatever the website crawl/Tofler/FileSure fallbacks still miss.
-        with _timed(company.company_name, "tavily.gather"):
-            tavily_result = self._tavily.gather(company.company_name, company.website)
+        #
+        # It never depends on the website crawl's output below (called with
+        # the company's original name/website, never the official name/URL
+        # discovered there), so it runs on self._tavily_browser - a fully
+        # separate Playwright instance, never self._browser - via the
+        # dedicated single-thread executor that owns that browser's whole
+        # lifecycle. That overlaps gather()'s full duration with the
+        # browser-bound website crawl below instead of adding to it, without
+        # two threads ever touching the same browser (see __init__).
+        if self._tavily_browser is not None:
+            tavily_future = self._tavily_executor.submit(
+                self._tavily.gather, company.company_name, company.website
+            )
+        else:
+            tavily_future = None
+            with _timed(company.company_name, "tavily.gather"):
+                tavily_result = self._tavily.gather(company.company_name, company.website)
 
         if company.website and company.website.startswith("http"):
             with _timed(company.company_name, "website crawl (email/address/contact)"):
@@ -274,6 +327,10 @@ class EnrichmentAgent(BaseClass):
                 ) = self._enrich_from_website(company, contact_pipeline)
             cin = cin or website_cin
             phones.extend(website_phones)
+
+        if tavily_future is not None:
+            with _timed(company.company_name, "tavily.gather (awaiting, overlapped with website crawl)"):
+                tavily_result = tavily_future.result()
 
         email = email or tavily_result.email
         address = address or tavily_result.address
@@ -303,6 +360,15 @@ class EnrichmentAgent(BaseClass):
                 )
             gst = gst or (gst_turnover_result.gst.value or None)
             turnover = turnover or (gst_turnover_result.turnover.value or None)
+
+        # jamku only looks up by GSTIN, so it can only run once one is known
+        # (from the input record or the resolve() call above) and only for
+        # whatever turnover the steps above still haven't filled in.
+        jamku_turnover = None
+        if settings.ENRICHMENT_LOOKUP_TURNOVER and not turnover and gst:
+            with _timed(company.company_name, "jamku turnover lookup"):
+                jamku_turnover = self._turnover.lookup(gst)
+            turnover = turnover or jamku_turnover
 
         if tavily_result.contact_person:
             tavily_candidate = contact_pipeline.external_candidate(
@@ -397,6 +463,15 @@ class EnrichmentAgent(BaseClass):
         normalized_city = canonical_city(city) or city
         district = canonical_district(company.district) or CITY_DISTRICTS.get(normalized_city)
         locality = canonical_locality(company.locality, normalized_city) or canonical_locality(address or company.address, normalized_city)
+        if not normalized_city and locality:
+            # An unambiguous locality (e.g. "Ambattur") still identifies the
+            # company's real city even when nothing else did - backfilling it
+            # here, rather than leaving city/district unresolved, is what lets
+            # ValidationAgent's classify_location reject it outright instead
+            # of merely flagging it "unverified" for the wrong requested city.
+            normalized_city = city_for_locality(locality)
+            city = city or normalized_city
+            district = district or CITY_DISTRICTS.get(normalized_city)
         if not (city and state and district and locality):
             with _timed(company.company_name, "geocoding"):
                 geocoded = self._geocoder.geocode(address or company.address)
@@ -433,6 +508,16 @@ class EnrichmentAgent(BaseClass):
                 "gst_source_type": gst_turnover_result.gst.source_type or "",
                 "turnover_source_type": gst_turnover_result.turnover.source_type or "",
             })
+        if jamku_turnover:
+            field_confidence = dict(field_confidence)
+            field_sources = dict(field_sources)
+            field_evidence = dict(field_evidence)
+            field_confidence["turnover"] = TURNOVER_SOURCE_POINTS["jamku"]
+            field_sources["turnover"] = JAMKU_GSTIN_URL_TEMPLATE.format(gstin=gst)
+            field_status["turnover"] = "verified"
+            field_evidence["turnover_financial_year"] = ""
+            field_evidence["turnover_metric"] = "Aggregate Turnover Slab"
+            field_evidence["turnover_source_type"] = "jamku"
         field_status["contact"] = "verified" if contact_result and contact_result.confidence >= 90 else ("probable" if contact_result else "needs_verification")
 
         remark = None
@@ -484,8 +569,12 @@ class EnrichmentAgent(BaseClass):
                 "field_evidence": field_evidence,
                 "field_sources": field_sources,
                 "field_status": field_status,
-                "turnover_financial_year": gst_turnover_result.turnover.financial_year if gst_turnover_result else company.turnover_financial_year,
-                "turnover_metric": gst_turnover_result.turnover.metric if gst_turnover_result else company.turnover_metric,
+                "turnover_financial_year": None if jamku_turnover else (
+                    gst_turnover_result.turnover.financial_year if gst_turnover_result else company.turnover_financial_year
+                ),
+                "turnover_metric": "Aggregate Turnover Slab" if jamku_turnover else (
+                    gst_turnover_result.turnover.metric if gst_turnover_result else company.turnover_metric
+                ),
             }
         )
         return enriched

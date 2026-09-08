@@ -16,7 +16,7 @@ class Crawl4AIClientTests(unittest.TestCase):
             page = client.crawl("https://example.com")
 
         self.assertIs(page, expected)
-        worker.assert_called_once_with("https://example.com")
+        worker.assert_called_once_with("https://example.com", None)
 
 
 if __name__ == "__main__":

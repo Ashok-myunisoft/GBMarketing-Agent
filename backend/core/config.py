@@ -43,7 +43,16 @@ class Settings:
 
     PLAYWRIGHT_ENGINE = os.getenv("PLAYWRIGHT_ENGINE", "rotate").lower()
 
-    ENRICHMENT_CONCURRENCY = max(1, int(os.getenv("ENRICHMENT_CONCURRENCY", "3")))
+    # Raised from 3 - each worker now also owns a second, dedicated browser
+    # for Tavily's gather() (see EnrichmentAgent.__init__), so RAM/CPU cost
+    # roughly doubles per worker added; only raise further with server
+    # capacity confirmed. Firecrawl-bound work (GST/turnover, Tavily's own
+    # crawl/PDF fetches) won't get any faster from more workers - they all
+    # still queue behind the same global FIRECRAWL_MAX_CONCURRENCY /
+    # FIRECRAWL_MAX_REQUESTS_PER_MINUTE limiter regardless of worker count.
+    # This only helps the non-Firecrawl-bound stages (website crawl, Tofler,
+    # LinkedIn, jamku, geocoding) overlap across more companies at once.
+    ENRICHMENT_CONCURRENCY = max(1, int(os.getenv("ENRICHMENT_CONCURRENCY", "5")))
     ENRICHMENT_MAX_SUPPLEMENTAL_PAGES = max(
         0, int(os.getenv("ENRICHMENT_MAX_SUPPLEMENTAL_PAGES", "2"))
     )
@@ -89,8 +98,19 @@ class Settings:
     # (services/gst_turnover_enrichment/firecrawl_client.py's .scrape()).
     FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
     FIRECRAWL_API_URL = os.getenv("FIRECRAWL_API_URL", "http://217.217.249.121:3002")
-    FIRECRAWL_MAX_CONCURRENCY = max(1, int(os.getenv("FIRECRAWL_MAX_CONCURRENCY", "2")))
-    FIRECRAWL_MAX_REQUESTS_PER_MINUTE = max(1, int(os.getenv("FIRECRAWL_MAX_REQUESTS_PER_MINUTE", "60")))
+    # Raised from the original 2/60 (then 4/120) - large batches (hundreds of
+    # companies) were bottlenecked almost entirely on this shared global
+    # gate, since it throttles every worker/company identically regardless
+    # of ENRICHMENT_CONCURRENCY. 200/min needs enough concurrent in-flight
+    # slots to actually be reachable (at ~2s/call, sustaining ~3.3 req/sec
+    # needs roughly 6-8 concurrent requests in flight on average) - hence
+    # concurrency raised alongside it, not left behind. Re-tune (via the env
+    # vars) against whatever this actually does to the self-hosted
+    # instance's own error/latency rate; a rising rate of RATE_LIMITED/
+    # timeout errors in the [FIRECRAWL] logs means back off, since a failed
+    # call silently costs data quality (an empty result), not just time.
+    FIRECRAWL_MAX_CONCURRENCY = max(1, int(os.getenv("FIRECRAWL_MAX_CONCURRENCY", "8")))
+    FIRECRAWL_MAX_REQUESTS_PER_MINUTE = max(1, int(os.getenv("FIRECRAWL_MAX_REQUESTS_PER_MINUTE", "200")))
     FIRECRAWL_MAX_RETRIES = max(0, int(os.getenv("FIRECRAWL_MAX_RETRIES", "1")))
     FIRECRAWL_TIMEOUT_SECONDS = max(1, int(os.getenv("FIRECRAWL_TIMEOUT_SECONDS", "30")))
     FIRECRAWL_TIMEOUT_MS = max(
@@ -101,8 +121,15 @@ class Settings:
     FIRECRAWL_MAX_PDFS_PER_PAGE = max(0, int(os.getenv("FIRECRAWL_MAX_PDFS_PER_PAGE", "2")))
     # GST/turnover company-name fallback.  These limits are intentionally
     # separate from the broader discovery/enrichment pipeline.
-    MAX_SEARCH_QUERIES_PER_FIELD = max(1, int(os.getenv("MAX_SEARCH_QUERIES_PER_FIELD", "4")))
-    MAX_RESULT_URLS_PER_FIELD = max(1, int(os.getenv("MAX_RESULT_URLS_PER_FIELD", "3")))
+    # Lowered from 4/3 - a company genuinely absent from every source (the
+    # worst case, common for small/obscure MSME leads) previously cost up to
+    # 3 queries x (1 search + 3 scrapes) = 12 Firecrawl calls per field, 24
+    # across both fields. This halves that ceiling to ~12 total, trading a
+    # real but modest chance of missing GST/turnover for a company that only
+    # the 3rd query/3rd result URL would have found, for materially less
+    # worst-case time per company at batch scale.
+    MAX_SEARCH_QUERIES_PER_FIELD = max(1, int(os.getenv("MAX_SEARCH_QUERIES_PER_FIELD", "2")))
+    MAX_RESULT_URLS_PER_FIELD = max(1, int(os.getenv("MAX_RESULT_URLS_PER_FIELD", "2")))
     MAX_FIRECRAWL_PAGES_PER_COMPANY = max(1, int(os.getenv("MAX_FIRECRAWL_PAGES_PER_COMPANY", "5")))
     FIRECRAWL_SEARCH_TIMEOUT_SECONDS = max(1, int(os.getenv("FIRECRAWL_SEARCH_TIMEOUT_SECONDS", "30")))
     FIRECRAWL_SEARCH_MAX_RETRIES = max(0, int(os.getenv("FIRECRAWL_SEARCH_MAX_RETRIES", "1")))

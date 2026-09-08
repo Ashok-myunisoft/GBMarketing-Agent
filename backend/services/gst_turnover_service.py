@@ -20,7 +20,9 @@ from typing import Optional
 
 from playwright.sync_api import BrowserContext, Page
 
+from core.config import settings
 from services.browser_service import BrowserService
+from services.gst_turnover_enrichment.crawl4ai_client import Crawl4AIClient
 
 logger = logging.getLogger(__name__)
 
@@ -31,18 +33,46 @@ JAMKU_SEARCH_INPUT = "#gstnosearch"
 # Google has flagged the request as automated traffic) - the destination is
 # fixed, so turnover lookups shouldn't go blind just because Google did.
 JAMKU_FALLBACK_URL = "https://gst.jamku.app/"
+# jamku also serves each GSTIN's profile directly by URL (confirmed by hand),
+# which the Crawl4AI fallback below uses instead of driving the search box.
+JAMKU_GSTIN_URL_TEMPLATE = "https://gst.jamku.app/gstin/{gstin}"
+
+# Same reveal interaction as _extract_aggregate_turnover's Playwright click,
+# reimplemented as injected JS: Crawl4AI only ever captures the page as
+# loaded, so without this the "Aggregate Turnover" section still shows its
+# unrevealed "View Aggregate Turnover" placeholder instead of the slab.
+_JAMKU_REVEAL_TURNOVER_JS = """
+(() => {
+    const nodes = document.querySelectorAll('*');
+    for (const node of nodes) {
+        if (node.children.length === 0 && node.textContent.trim() === 'Aggregate Turnover') {
+            const container = node.closest('div') || node.parentElement;
+            const button = container ? container.querySelector('button') : null;
+            if (button) { button.click(); }
+            break;
+        }
+    }
+})();
+"""
+
+# Shared by both the Playwright and Crawl4AI extraction paths so a change to
+# the label format only needs updating in one place.
+_SLAB_LINE_PATTERN = re.compile(r"^Slab:\s*(.+?)(?:\s+FY\s*\d{4}-\d{4})?\s*$", re.IGNORECASE)
 
 
 class GstTurnoverService:
     """Drives gst.jamku.app's public GSTIN search to read the Aggregate Turnover slab."""
 
-    def __init__(self, browser: BrowserService):
+    def __init__(self, browser: BrowserService, crawl4ai: Optional[Crawl4AIClient] = None):
         self._browser = browser
         self._cache: dict[str, Optional[str]] = {}
         self._jamku_url: Optional[str] = None
         # Reused across every lookup() call instead of a fresh anonymous
         # context per GSTIN - see GstEnrichmentService for the same choice.
         self._context: Optional[BrowserContext] = None
+        # Fallback only, used when the Playwright-driven lookup below fails
+        # or times out (e.g. a blocked/unresponsive browser context).
+        self._crawl4ai = crawl4ai or Crawl4AIClient()
 
     def lookup(self, gstin: Optional[str]) -> Optional[str]:
         if not gstin:
@@ -51,8 +81,30 @@ class GstTurnoverService:
         if normalized in self._cache:
             return self._cache[normalized]
         label = self._lookup_live(normalized)
+        if label is None and settings.CRAWL4AI_ENABLED:
+            label = self._lookup_crawl4ai(normalized)
         self._cache[normalized] = label
         return label
+
+    def _lookup_crawl4ai(self, gstin: str) -> Optional[str]:
+        """Re-attempts the same reveal-and-read against jamku's direct
+        per-GSTIN URL through Crawl4AI. Never raises: any failure here just
+        means the not_found result from the Playwright attempt stands."""
+        url = JAMKU_GSTIN_URL_TEMPLATE.format(gstin=gstin)
+        page = self._crawl4ai.crawl(url, js_code=_JAMKU_REVEAL_TURNOVER_JS)
+        if not page.success or not page.content:
+            logger.info("[CRAWL4AI] jamku fallback url=%s status=failed", url)
+            return None
+        for line in page.content.splitlines():
+            match = _SLAB_LINE_PATTERN.match(line.strip())
+            if match:
+                label = match.group(1).strip()
+                if label and "not available" not in label.lower():
+                    logger.info("[CRAWL4AI] jamku fallback url=%s status=success", url)
+                    return label
+                return None
+        logger.info("[CRAWL4AI] jamku fallback url=%s status=not_found", url)
+        return None
 
     def _get_context(self) -> BrowserContext:
         if self._context is None:
@@ -119,6 +171,6 @@ class GstTurnoverService:
             return None
         if not text or "not available" in text.lower():
             return None
-        match = re.match(r"Slab:\s*(.+?)(?:\s+FY\s*\d{4}-\d{4})?\s*$", text, re.IGNORECASE)
+        match = _SLAB_LINE_PATTERN.match(text)
         label = match.group(1).strip() if match else text
         return label or None

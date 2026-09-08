@@ -15,7 +15,12 @@ GST_SOURCE_POINTS = {"authoritative": 95, "official_document": 92, "annual_repor
 # table - a PDF is only tagged "annual_report" when its link text/URL says
 # so (pdf_utils.is_annual_report); anything else found in a PDF is the
 # generic, lower-weighted "pdf" tier.
-TURNOVER_SOURCE_POINTS = {"annual_report": 95, "official_document": 92, "filesure": 85, "website": 80, "pdf": 80, "search": 80}
+#
+# "jamku" is gst.jamku.app's Aggregate Turnover slab (GstTurnoverService) -
+# derived from the GST portal's own filing data rather than a self-reported
+# figure, but only ever a coarse range, not an exact number - scored above a
+# generic scraped page/PDF but below an annual report's exact figure.
+TURNOVER_SOURCE_POINTS = {"annual_report": 95, "official_document": 92, "filesure": 85, "jamku": 85, "website": 80, "pdf": 80, "search": 80}
 
 MATCHING_BONUS = 30
 MAX_CONFIDENCE = 100

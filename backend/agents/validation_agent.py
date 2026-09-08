@@ -331,6 +331,7 @@ class ValidationAgent(BaseClass):
                 alternate_mobile_number=company.phone_alt,
                 email_id=company.email,
                 city=company.city,
+                address=company.address,
                 industry_type=company.industry,
                 region=company.region,
                 contact_person=company.contact_person,

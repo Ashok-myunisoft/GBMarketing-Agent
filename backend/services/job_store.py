@@ -19,6 +19,7 @@ class JobStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._initialize()
+        self._reconcile_orphaned_jobs()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path, timeout=30, isolation_level=None)
@@ -56,6 +57,35 @@ class JobStore:
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def _reconcile_orphaned_jobs(self) -> None:
+        """Fails any job left "queued"/"running" from a previous process.
+
+        Each job runs as a plain daemon thread (see JobService._run) with no
+        persistence of its in-memory state: if the server restarts (deploy,
+        crash, dev-server reload) while a job is mid-flight, that thread is
+        simply gone, but its row was never updated - it sits at "running"
+        forever with no error, indistinguishable in the UI from genuinely
+        still working. A brand-new JobStore in a brand-new process cannot
+        have a live thread for any job already marked "queued"/"running" in
+        the database, so every one of them is, by definition, orphaned from
+        an earlier process. Runs once per process (JobService constructs a
+        single JobStore instance at import time), not on every request.
+        """
+        with self._lock, closing(self._connect()) as connection:
+            orphaned = connection.execute(
+                "SELECT id FROM jobs WHERE status IN ('queued', 'running')"
+            ).fetchall()
+            if not orphaned:
+                return
+            now = self._now()
+            error = "Job did not complete before the server restarted (orphaned from a previous process)"
+            for row in orphaned:
+                connection.execute(
+                    "UPDATE jobs SET status = ?, completed_at = ?, error = ? WHERE id = ?",
+                    ("failed", now, error, row["id"]),
+                )
+                self._add_event(connection, row["id"], None, "failed", error)
 
     def create(self, query: str) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
