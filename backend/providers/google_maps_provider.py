@@ -9,6 +9,7 @@ from providers.base_provider import BaseProvider
 from schemas.company import Company
 from schemas.search_request import SearchRequest
 from services.browser_service import BrowserService
+from services.geocoding_service import GeoapifyGeocodingService, GeocodedAddress
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,13 @@ class GoogleMapsProvider(BaseProvider):
     set), or a safety cap on scroll attempts is hit.
     """
 
-    def __init__(self, browser: Optional[BrowserService] = None):
+    def __init__(self, browser: Optional[BrowserService] = None, geocoder: Optional[GeoapifyGeocodingService] = None):
         self._browser = browser or BrowserService()
+        # Reused across every search() call on this instance, so geocoding
+        # the same location string across ~9-16 industry sub-queries for
+        # one search (see services/search_services.py) only ever costs one
+        # real network call - GeoapifyGeocodingService caches by string.
+        self._geocoder = geocoder or GeoapifyGeocodingService()
 
     def search(self, request: SearchRequest) -> List[Company]:
 
@@ -76,8 +82,19 @@ class GoogleMapsProvider(BaseProvider):
 
                 self._load_results(page, max_results=request.max_results)
 
+                # Geocoded once per distinct location string (cached across
+                # every industry sub-query for it - see __init__) so
+                # _is_within_requested_location can reject a result at full
+                # district/city precision even for a requested city outside
+                # the small hand-picked CITY_ALIASES/CITY_DISTRICTS seed
+                # lists, not just the cities already hand-added there.
+                requested_geocoded = (
+                    self._geocoder.geocode(request.location) if request.location else None
+                )
+
                 companies = self._extract_companies(
-                    page, max_results=request.max_results, requested_location=request.location
+                    page, max_results=request.max_results, requested_location=request.location,
+                    requested_geocoded=requested_geocoded,
                 )
 
                 print(f"Maps Results : {len(companies)}")
@@ -141,7 +158,8 @@ class GoogleMapsProvider(BaseProvider):
             previous_count = current_count
 
     def _extract_companies(
-        self, page: Page, max_results: int, requested_location: Optional[str] = None
+        self, page: Page, max_results: int, requested_location: Optional[str] = None,
+        requested_geocoded: Optional[GeocodedAddress] = None,
     ) -> List[Company]:
 
         result_links = page.locator(RESULT_LINK_SELECTOR)
@@ -167,7 +185,7 @@ class GoogleMapsProvider(BaseProvider):
                 logger.warning("Skipping unparsable Maps result at index %d: %s", i, ex)
                 continue
 
-            if not self._is_within_requested_location(company, requested_location):
+            if not self._is_within_requested_location(company, requested_location, requested_geocoded):
                 continue
 
             normalized_name = company.company_name.strip().lower()
@@ -179,7 +197,10 @@ class GoogleMapsProvider(BaseProvider):
         return list(by_name.values())[:max_results]
 
     @staticmethod
-    def _is_within_requested_location(company: Company, requested_location: Optional[str]) -> bool:
+    def _is_within_requested_location(
+        company: Company, requested_location: Optional[str],
+        requested_geocoded: Optional[GeocodedAddress] = None,
+    ) -> bool:
         """Drops a result only on confirmed conflicting evidence.
 
         Maps itself decides how far to search, and pads a sparse local
@@ -192,10 +213,20 @@ class GoogleMapsProvider(BaseProvider):
         city/locality, never merely because the address is missing or
         doesn't mention the requested place (that stays "unknown", kept,
         and left for ValidationAgent to flag as unverified).
+
+        ``requested_geocoded`` - the caller's one-time geocoding of
+        ``requested_location`` - lets this reject at full district/city
+        precision even for a requested city outside the small hand-picked
+        CITY_ALIASES/CITY_DISTRICTS seed lists (e.g. "Nagpur").
         """
         if not requested_location:
             return True
-        decision, reason = classify_location(None, None, company.address, requested_location)
+        decision, reason = classify_location(
+            None, None, company.address, requested_location,
+            requested_geocoded_state=requested_geocoded.state if requested_geocoded else None,
+            requested_geocoded_district=requested_geocoded.district if requested_geocoded else None,
+            requested_geocoded_city=requested_geocoded.city if requested_geocoded else None,
+        )
         if decision == "outside":
             logger.info(
                 "Dropping Maps result '%s' outside requested '%s': %s",

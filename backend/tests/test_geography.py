@@ -2,6 +2,8 @@ import unittest
 
 from config.geography import (
     CITY_LOCALITIES,
+    CITY_STATE,
+    canonical_city,
     city_for_locality,
     classify_location,
     hierarchy_ids,
@@ -104,6 +106,110 @@ class ClassifyLocationTests(unittest.TestCase):
         )
         self.assertEqual(decision, "outside")
 
+    def test_locality_request_for_a_city_whose_district_name_differs_catches_a_different_named_city(self):
+        # Bengaluru's district is "Bengaluru Urban" (not "Bengaluru"), so a
+        # locality-suffixed request like "Peenya, Bengaluru" never reaches
+        # the district branch's own address-fallback at all - this exercises
+        # the locality branch's matching fallback instead. Without it, a
+        # Chennai company surfaced by a Bengaluru locality search (Google
+        # Maps padding a sparse local result set) would only ever come back
+        # "unknown", never "outside".
+        decision, reason = classify_location(
+            None, None, "45 Anna Salai, Chennai, Tamil Nadu", "Peenya, Bengaluru",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Chennai", reason)
+
+    def test_locality_request_for_hosur_catches_a_different_named_city(self):
+        # Hosur's district is "Krishnagiri", the same city/district-name
+        # mismatch as Bengaluru.
+        decision, reason = classify_location(
+            None, None, "Plot 9, SIDCO Estate, Chennai", "Hosur SIPCOT, Hosur",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Chennai", reason)
+
+    def test_locality_request_still_matches_the_genuine_locality(self):
+        decision, _ = classify_location(
+            None, None, "Plot 4, Peenya Industrial Area, Bengaluru", "Peenya, Bengaluru",
+        )
+        self.assertEqual(decision, "match")
+
+    def test_locality_request_with_no_city_evidence_at_all_stays_unknown(self):
+        decision, _ = classify_location(None, None, "Plot 4, Industrial Estate", "Peenya, Bengaluru")
+        self.assertEqual(decision, "unknown")
+
+    def test_city_request_catches_a_company_confidently_in_a_different_state(self):
+        # Delhi/Mumbai aren't in CITY_ALIASES/CITY_LOCALITIES at all - the
+        # small seeded-city checks above can never recognise them by name.
+        # STATE_NAMES covers them though, so this is the broader signal that
+        # closes that gap: a Delhi or Mumbai listing surfaced by a loosely
+        # geo-scoped Coimbatore search now gets caught by state, not just by
+        # the tiny South-Indian city/locality seed lists.
+        decision, reason = classify_location(
+            None, None, "123 Connaught Place, New Delhi, Delhi", "Coimbatore",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Delhi", reason)
+
+    def test_locality_request_also_catches_a_company_in_a_different_state(self):
+        # Kolkata is deliberately NOT a seeded city, so this exercises the
+        # state-only fallback rather than the (now stronger, since Mumbai is
+        # seeded) city-level check just above it.
+        decision, reason = classify_location(
+            None, None, "45 Park Street, Kolkata, West Bengal", "Peenya, Bengaluru",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("West Bengal", reason)
+
+    def test_locality_request_catches_a_now_seeded_city_before_the_state_check(self):
+        # Mumbai is now seeded (added from real query history), so this
+        # mismatch is caught at the city level - a strictly more precise
+        # result than the state-only fallback above.
+        decision, reason = classify_location(
+            None, None, "45 MG Road, Mumbai, Maharashtra", "Peenya, Bengaluru",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Mumbai", reason)
+
+    def test_district_request_also_catches_a_company_in_a_different_state(self):
+        decision, reason = classify_location(
+            None, None, "Plot 9, SIDCO Estate, Kolkata, West Bengal", "Coimbatore district",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("West Bengal", reason)
+
+    def test_newly_seeded_cities_from_real_query_history_are_recognised(self):
+        # These were already being searched for (backend/data/jobs.sqlite3)
+        # with zero seed data protecting them - added from real usage, not
+        # speculatively.
+        for city in ("Hyderabad", "Mumbai", "Pune", "Ahmedabad", "Kochi", "Sricity", "Kancheepuram", "Sivakasi"):
+            self.assertEqual(canonical_city(city), city, city)
+            self.assertIn(city, CITY_STATE, city)
+
+    def test_a_different_newly_seeded_city_is_caught_for_a_newly_seeded_requested_city(self):
+        decision, reason = classify_location(None, None, "Plot 2, MIDC, Pune, Maharashtra", "Hyderabad")
+        self.assertEqual(decision, "outside")
+        self.assertIn("Pune", reason)
+
+    def test_common_misspelling_of_a_newly_seeded_city_still_resolves(self):
+        # "Hydrabad" (missing an 'e') appears verbatim in real query history.
+        decision, _ = classify_location("Hyderabad", "Telangana", None, "Hydrabad")
+        self.assertEqual(decision, "match")
+
+    def test_ahmedabad_alias_addition_does_not_break_existing_address_substring_fallback(self):
+        # Regression guard for the exact case the normalization fix (making
+        # requested_canonical always lowercase, never a mixed-case canonical
+        # string) protects: this passed before Ahmedabad was seeded and must
+        # keep passing now that it is.
+        decision, _ = classify_location(None, None, "Plot 4, Ahmedabad, Gujarat", "Ahmedabad")
+        self.assertEqual(decision, "match")
+
+    def test_state_check_never_misfires_when_neither_side_is_resolvable(self):
+        # No state evidence anywhere - must stay unknown, not outside.
+        decision, _ = classify_location(None, None, "Plot 4, Industrial Estate", "Coimbatore")
+        self.assertEqual(decision, "unknown")
+
     def test_unstructured_address_naming_a_different_known_city_is_outside(self):
         # A Chennai listing surfaced by a loosely geo-scoped Coimbatore
         # search, with no structured city/state resolved at all - the
@@ -151,6 +257,84 @@ class CityForLocalityTests(unittest.TestCase):
     def test_unknown_locality_resolves_to_none(self):
         self.assertIsNone(city_for_locality("Nowhereville"))
         self.assertIsNone(city_for_locality(None))
+
+
+class ClassifyLocationGeocodedOverrideTests(unittest.TestCase):
+    """Covers requested_geocoded_* - the caller's own one-time geocoding of
+    the *requested* location (e.g. via GeoapifyGeocodingService), used to
+    make classify_location work at full district/city precision for a
+    requested city outside the small hand-picked seed lists (e.g. "Nagpur",
+    never seeded in CITY_ALIASES/CITY_DISTRICTS)."""
+
+    def test_unseeded_requested_city_same_state_different_district_is_outside(self):
+        # Company already resolved to Pune (e.g. by EnrichmentAgent's own
+        # geocoding) - Nagpur itself is never seeded anywhere in this module.
+        decision, reason = classify_location(
+            "Pune", "Maharashtra", "Plot 4, MIDC, Pune, Maharashtra", "Nagpur",
+            company_district="Pune",
+            requested_geocoded_state="Maharashtra", requested_geocoded_district="Nagpur",
+            requested_geocoded_city="Nagpur",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Pune", reason)
+
+    def test_unseeded_requested_city_genuine_match_is_match(self):
+        decision, reason = classify_location(
+            "Nagpur", "Maharashtra", "Plot 4, MIDC, Nagpur, Maharashtra", "Nagpur",
+            company_district="Nagpur",
+            requested_geocoded_state="Maharashtra", requested_geocoded_district="Nagpur",
+            requested_geocoded_city="Nagpur",
+        )
+        self.assertEqual(decision, "match")
+
+    def test_unseeded_requested_city_cross_state_leak_still_caught(self):
+        decision, reason = classify_location(
+            None, None, "123 Connaught Place, New Delhi, Delhi", "Nagpur",
+            requested_geocoded_state="Maharashtra", requested_geocoded_district="Nagpur",
+            requested_geocoded_city="Nagpur",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Delhi", reason)
+
+    def test_pre_enrichment_search_time_address_names_a_different_seeded_city(self):
+        # No structured company fields at all (GoogleMapsProvider's
+        # search-time filter, before EnrichmentAgent ever runs) - only the
+        # raw address text, which names a city (Pune) that's seeded in
+        # CITY_ALIASES but was never given a CITY_DISTRICTS entry.
+        decision, reason = classify_location(
+            None, None, "Plot 4, MIDC, Pune, Maharashtra", "Nagpur",
+            requested_geocoded_state="Maharashtra", requested_geocoded_district="Nagpur",
+            requested_geocoded_city="Nagpur",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Pune", reason)
+
+    def test_pre_enrichment_search_time_genuine_address_stays_unknown_not_outside(self):
+        # Nagpur itself isn't seeded, so this can't be confirmed "match" pre-
+        # enrichment - it must never be wrongly rejected either.
+        decision, _ = classify_location(
+            None, None, "Plot 4, MIDC, Nagpur, Maharashtra", "Nagpur",
+            requested_geocoded_state="Maharashtra", requested_geocoded_district="Nagpur",
+            requested_geocoded_city="Nagpur",
+        )
+        self.assertEqual(_, "company district could not be determined")
+
+    def test_omitting_the_overrides_keeps_seed_list_only_behavior(self):
+        # No requested_geocoded_* passed at all - must behave identically to
+        # every pre-existing test in this file.
+        decision, reason = classify_location(
+            None, None, "12 GST Road, Chennai, Tamil Nadu", "Coimbatore",
+        )
+        self.assertEqual(decision, "outside")
+        self.assertIn("Chennai", reason)
+
+    def test_no_evidence_anywhere_stays_unknown_even_with_overrides_given(self):
+        decision, _ = classify_location(
+            None, None, "Plot 4, Industrial Estate", "Nagpur",
+            requested_geocoded_state="Maharashtra", requested_geocoded_district="Nagpur",
+            requested_geocoded_city="Nagpur",
+        )
+        self.assertEqual(decision, "unknown")
 
 
 class LocationQueryVariantsTests(unittest.TestCase):

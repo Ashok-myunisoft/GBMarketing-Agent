@@ -4,7 +4,7 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
-from urllib.parse import quote_plus, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from core.config import settings
 from services.browser_service import BrowserService
@@ -19,20 +19,6 @@ logger = logging.getLogger(__name__)
 _LOG_TAG = {"GST Number": "GST", "Turnover": "TURNOVER"}
 
 
-def _duckduckgo_search_url(query: str) -> str:
-    """DuckDuckGo's no-JS HTML endpoint, crawled directly by Crawl4AI using
-    the exact same per-field queries Firecrawl already builds (_queries),
-    when neither Firecrawl nor a known-website crawl found a value.
-
-    Google was deliberately not chosen here: this codebase already hit
-    Google's automated-browser blocking once (the removed
-    GstEnrichmentService's ``last_blocked`` handling) - part of why this
-    project moved to API-based search in the first place. DuckDuckGo's HTML
-    endpoint needs no JS and tolerates automated fetches far better.
-    """
-    return f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-
-
 def _normalize_result_url(url: str) -> str:
     """Normalize a search-result URL for deduplication: lowercase
     scheme/host, drop the fragment, and strip a trailing slash so
@@ -44,7 +30,7 @@ def _normalize_result_url(url: str) -> str:
 
 
 class GstTurnoverEnrichmentService:
-    """Searches Firecrawl using a company name; it never scrapes its website."""
+    """Searches Firecrawl by company name with Crawl4AI as a page-level fallback."""
 
     def __init__(self, browser: BrowserService, firecrawl: FirecrawlClient, crawl4ai: Optional[Crawl4AIClient] = None):
         # ``browser`` remains an injected argument for compatibility with the
@@ -114,42 +100,144 @@ class GstTurnoverEnrichmentService:
         self, field_name: str, field: str, company_name: str, website: Optional[str],
         city: Optional[str], state: Optional[str], industry: Optional[str], points_table: dict,
     ) -> Optional[FieldResult]:
-        """Runs only when Firecrawl found nothing for this field: Firecrawl
-        request failed/errored/timed out/returned empty content, or its
-        content yielded no valid GSTIN/turnover.
+        """Runs only when Firecrawl Search could not resolve the field.
 
-        Two tiers, cheapest first:
-          1. The company's own site, if already known - often sufficient on
-             its own and needs no extra network round trip beyond the crawl.
-          2. The same per-field queries Firecrawl already builds
-             (_queries), each crawled against DuckDuckGo's HTML search -
-             covers companies with no known website at all, which a
-             website-only fallback can never help.
-        Stops at the first tier/query that yields a value. Returns None
-        (keep the existing not_found result) whenever nothing usable comes
-        back from either tier - this can never fail the enrichment run."""
+        Crawl4AI is used only against real candidate web pages. It never
+        crawls a search-engine HTML endpoint, so DuckDuckGo/Google anti-bot
+        pages cannot break the fallback.
+
+        Fallback order:
+          1. Crawl the known company website, when available.
+          2. If no value was found there, ask Firecrawl Search for candidate
+             result URLs and crawl those URLs directly with Crawl4AI.
+          3. Return None when no usable evidence is found.
+
+        The existing Firecrawl Search -> extraction -> validation flow remains
+        unchanged; this method is only a fallback."""
         if not settings.CRAWL4AI_ENABLED:
             return None
+
         tag = _LOG_TAG[field_name]
+        crawled_urls: set[str] = set()
 
+        # Tier 1: known company website.
         if website:
-            candidates = self._crawl4ai_extract(company_name, field, website, "website", city, state, industry)
+            normalized_website = _normalize_result_url(website)
+            crawled_urls.add(normalized_website)
+
+            candidates = self._crawl4ai_extract(
+                company_name,
+                field,
+                website,
+                "website",
+                city,
+                state,
+                industry,
+            )
             if candidates:
-                result = self._resolve_field(field_name, company_name, candidates, points_table)
-                logger.info("[%s] provider=crawl4ai tier=website company=%s url=%s status=%s",
-                            tag, company_name, website, result.status)
+                result = self._resolve_field(
+                    field_name, company_name, candidates, points_table
+                )
+                logger.info(
+                    "[%s] provider=crawl4ai tier=website company=%s url=%s status=%s",
+                    tag,
+                    company_name,
+                    website,
+                    result.status,
+                )
                 return result
 
-        for query in self._queries(company_name, field):
-            search_url = _duckduckgo_search_url(query)
-            candidates = self._crawl4ai_extract(company_name, field, search_url, "search", city, state, industry)
-            if candidates:
-                result = self._resolve_field(field_name, company_name, candidates, points_table)
-                logger.info("[%s] provider=crawl4ai tier=query_search company=%s query=%s status=%s",
-                            tag, company_name, query, result.status)
-                return result
+        # Tier 2: use Firecrawl Search only to discover real result URLs.
+        # Crawl4AI then opens those URLs directly instead of crawling
+        # html.duckduckgo.com, which was returning HTTP 403 anti-bot errors.
+        crawl_budget = max(0, settings.MAX_RESULT_URLS_PER_FIELD)
 
-        logger.info("[%s] provider=crawl4ai company=%s status=not_found", tag, company_name)
+        if crawl_budget:
+            for query in self._queries(company_name, field):
+                try:
+                    search_results = self._firecrawl.search(
+                        query,
+                        limit=10,
+                        company=company_name,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[%s] provider=firecrawl tier=fallback_search company=%s query=%s",
+                        tag,
+                        company_name,
+                        query,
+                    )
+                    continue
+
+                ranked_results = self._rank_results(
+                    company_name,
+                    field,
+                    search_results,
+                    city,
+                    state,
+                    industry,
+                )
+
+                for search_result in ranked_results:
+                    if crawl_budget <= 0:
+                        break
+
+                    url = (search_result.url or "").strip()
+                    if not url:
+                        continue
+
+                    normalized_url = _normalize_result_url(url)
+                    if normalized_url in crawled_urls:
+                        continue
+
+                    # Never crawl search-engine result pages. Only crawl
+                    # actual HTTP(S) web pages returned by Firecrawl.
+                    parts = urlsplit(url)
+                    if parts.scheme.lower() not in {"http", "https"}:
+                        continue
+                    if "duckduckgo.com" in parts.netloc.lower():
+                        continue
+                    if "google." in parts.netloc.lower():
+                        continue
+                    if "bing.com" in parts.netloc.lower():
+                        continue
+
+                    crawled_urls.add(normalized_url)
+                    crawl_budget -= 1
+
+                    candidates = self._crawl4ai_extract(
+                        company_name,
+                        field,
+                        url,
+                        "search",
+                        city,
+                        state,
+                        industry,
+                    )
+                    if not candidates:
+                        continue
+
+                    result = self._resolve_field(
+                        field_name,
+                        company_name,
+                        candidates,
+                        points_table,
+                    )
+                    logger.info(
+                        "[%s] provider=crawl4ai tier=firecrawl_result_url "
+                        "company=%s url=%s status=%s",
+                        tag,
+                        company_name,
+                        url,
+                        result.status,
+                    )
+                    return result
+
+        logger.info(
+            "[%s] provider=crawl4ai company=%s status=not_found",
+            tag,
+            company_name,
+        )
         return None
 
     def _crawl4ai_extract(
@@ -278,7 +366,29 @@ class GstTurnoverEnrichmentService:
         selected = next(candidate for candidate in candidates if candidate.value == value)
         score = scored[value]
         if score < 70:
-            return FieldResult(confidence=score, source_url=selected.source_url, status="unverified", source_type=selected.source_type)
+            # Keep the extracted value even when confidence is below the
+            # verification threshold. "unverified" means the value was found
+            # but could not be verified strongly enough; it must not be
+            # discarded because downstream Excel/export logic uses `value`.
+            logger.info(
+                "[%s] found_unverified company=%s value=%s confidence=%s source=%s",
+                tag,
+                company_name,
+                value,
+                score,
+                selected.source_url,
+            )
+            return FieldResult(
+                value=value,
+                confidence=score,
+                sources=sorted(sources_by_value[value]),
+                source_url=selected.source_url,
+                financial_year=selected.financial_year,
+                metric=selected.metric,
+                currency=selected.currency,
+                status="unverified",
+                source_type=selected.source_type,
+            )
         logger.info("[%s] found company=%s value=%s source=%s", tag, company_name, value, selected.source_url)
         return FieldResult(value=value, confidence=score, sources=sorted(sources_by_value[value]), source_url=selected.source_url,
                            financial_year=selected.financial_year, metric=selected.metric, currency=selected.currency,

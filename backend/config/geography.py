@@ -18,6 +18,19 @@ CITY_ALIASES = {
     "chennai": "Chennai", "madras": "Chennai", "tiruppur": "Tiruppur",
     "madurai": "Madurai", "salem": "Salem", "erode": "Erode", "hosur": "Hosur",
     "tiruchirappalli": "Tiruchirappalli", "trichy": "Tiruchirappalli",
+    # Added from real search-query history (backend/data/jobs.sqlite3) -
+    # these were being searched already, just with no seed data at all to
+    # protect them, so classify_location's city/state checks silently never
+    # applied to them (canonical_city/_known_state_for_request both return
+    # None for anything not listed here).
+    "hyderabad": "Hyderabad", "hydrabad": "Hyderabad",
+    "mumbai": "Mumbai", "bombay": "Mumbai",
+    "pune": "Pune",
+    "ahmedabad": "Ahmedabad", "ahamedabad": "Ahmedabad",
+    "kochi": "Kochi", "cochin": "Kochi",
+    "sricity": "Sricity", "shri city": "Sricity", "shree city": "Sricity",
+    "kancheepuram": "Kancheepuram", "kanchipuram": "Kancheepuram",
+    "sivakasi": "Sivakasi",
 }
 
 # Seed locality/industrial-area list for the cities already covered by
@@ -68,6 +81,33 @@ STATE_NAMES = (
     "West Bengal", "Madhya Pradesh", "Bihar", "Odisha", "Punjab",
     "Haryana", "Goa", "Puducherry",
 )
+
+# Real state for each seeded city - used only to catch a company confidently
+# placed in a *different* state (e.g. a Delhi or Mumbai listing surfaced by a
+# loosely geo-scoped Coimbatore search). STATE_NAMES already covers all of
+# India's major states/UTs, so this check catches far more than the small
+# hand-picked CITY_ALIASES/CITY_LOCALITIES lists ever could on their own -
+# those only recognise conflicting evidence from this same handful of South
+# Indian cities, never a company plainly placed anywhere else in the country.
+CITY_STATE: dict[str, str] = {
+    "Coimbatore": "Tamil Nadu",
+    "Chennai": "Tamil Nadu",
+    "Bengaluru": "Karnataka",
+    "Tiruppur": "Tamil Nadu",
+    "Madurai": "Tamil Nadu",
+    "Salem": "Tamil Nadu",
+    "Erode": "Tamil Nadu",
+    "Hosur": "Tamil Nadu",
+    "Tiruchirappalli": "Tamil Nadu",
+    "Hyderabad": "Telangana",
+    "Mumbai": "Maharashtra",
+    "Pune": "Maharashtra",
+    "Ahmedabad": "Gujarat",
+    "Kochi": "Kerala",
+    "Sricity": "Andhra Pradesh",
+    "Kancheepuram": "Tamil Nadu",
+    "Sivakasi": "Tamil Nadu",
+}
 
 # Add localities here as the sales team expands into another target city. A
 # locality is never guessed: it is returned only after an exact address match.
@@ -195,6 +235,44 @@ def _state_name(value: Optional[str]) -> Optional[str]:
     return next((name for name in STATE_NAMES if _similar(_normalize(name), normalized) >= _FUZZY_MATCH_THRESHOLD), None)
 
 
+def _known_state_for_request(requested: str) -> Optional[str]:
+    """Best-effort real state for a request that resolves to one of our
+    seeded cities/districts/localities - whatever granularity classify_location
+    actually matched requested against. Returns None for a request this
+    codebase has no seed data for at all (nothing to compare against)."""
+    city = canonical_city(requested)
+    if city:
+        return CITY_STATE.get(city)
+    district = canonical_district(requested)
+    if district:
+        city = next((name for name, dist in CITY_DISTRICTS.items() if dist == district), None)
+        return CITY_STATE.get(city) if city else None
+    locality = canonical_locality(requested)
+    if locality:
+        return CITY_STATE.get(city_for_locality(locality) or "")
+    return None
+
+
+def _state_conflict(
+    company_state: Optional[str], company_address: Optional[str], requested_state_hint: Optional[str],
+) -> Optional[str]:
+    """Returns the company's actual state if it confidently differs from
+    requested_state_hint, else None (including when either side is unknown).
+
+    Only ever called once classify_location's own city/district/locality
+    checks have already come up empty - this is a broader, independent
+    signal (STATE_NAMES covers all of India's major states/UTs) that catches
+    a company placed somewhere the small CITY_ALIASES/CITY_LOCALITIES seed
+    lists were never going to recognise at all (e.g. Delhi, Mumbai).
+    """
+    if not requested_state_hint:
+        return None
+    actual_state = company_state or _state_name(company_address)
+    if actual_state and _normalize(actual_state) != _normalize(requested_state_hint):
+        return actual_state
+    return None
+
+
 def classify_location(
     company_city: Optional[str],
     company_state: Optional[str],
@@ -202,6 +280,9 @@ def classify_location(
     requested: Optional[str],
     company_district: Optional[str] = None,
     company_locality: Optional[str] = None,
+    requested_geocoded_state: Optional[str] = None,
+    requested_geocoded_district: Optional[str] = None,
+    requested_geocoded_city: Optional[str] = None,
 ) -> "tuple[str, str]":
     """Generic hierarchy-aware match between a requested location and a company's.
 
@@ -213,6 +294,16 @@ def classify_location(
     name. A company is only ever marked "outside" on positive conflicting
     evidence; missing/unresolvable data always falls back to "unknown" so it can
     be kept and flagged rather than silently dropped.
+
+    The three ``requested_geocoded_*`` parameters are optional overrides -
+    typically the caller's own one-time geocoding of ``requested`` (e.g. via
+    GeoapifyGeocodingService), not this module's own lookup. They let this
+    function work at full district/city precision for a requested location
+    outside the small hand-picked CITY_ALIASES/CITY_DISTRICTS/CITY_LOCALITIES
+    seed lists (e.g. "Nagpur", never seeded here) instead of only the broader,
+    state-level fallback those lists would otherwise leave it to. Omit them
+    (the default) to get exactly the seed-list-only behaviour this function
+    always had.
     """
     requested = (requested or "").strip()
     if not requested:
@@ -227,11 +318,32 @@ def classify_location(
             return "match", f"company state '{actual_state}' matches requested state '{requested_state}'"
         return "outside", f"resolved state '{actual_state}' does not match requested state '{requested_state}'"
 
+    # Best-effort real state for whatever the request resolves to below -
+    # checked only once every more specific city/district/locality check has
+    # come up empty. The caller's geocoded override always wins when given
+    # (it's real, authoritative data for literally any place); otherwise this
+    # falls back to the seed lists, exactly as before - STATE_NAMES covers
+    # far more ground than CITY_ALIASES/CITY_LOCALITIES ever could alone (a
+    # Delhi or Mumbai listing surfaced by a loosely geo-scoped Coimbatore
+    # search names a state those lists were never going to recognise at all).
+    requested_state_hint = requested_geocoded_state or _known_state_for_request(requested)
+
     # A known district matches a company confirmed in that district, or a
-    # city whose trusted seed parent is that district.
-    requested_district = canonical_district(requested)
+    # city whose trusted seed parent is that district. Same override
+    # precedence as the state hint above - a geocoded district for an
+    # unseeded requested city (e.g. "Nagpur") lets this branch apply at full
+    # district precision instead of only ever reaching the broader state
+    # fallback inside it.
+    requested_district = canonical_district(requested) or requested_geocoded_district
     if requested_district:
-        actual_district = canonical_district(company_district)
+        # company_district is a structured field (the same trust level the
+        # plain-city branch below already gives company_city) - not just
+        # canonicalized against the 9-entry CITY_DISTRICTS seed list, which
+        # would otherwise silently refuse to recognise a real, already-
+        # geocoded district like "Pune" or "Nagpur" purely because it was
+        # never hand-added there. Falling back to canonical_district(...)
+        # first still normalizes a known district's spelling variants.
+        actual_district = canonical_district(company_district) or company_district
         if not actual_district and company_city:
             actual_district = CITY_DISTRICTS.get(canonical_city(company_city) or company_city)
         if not actual_district:
@@ -245,10 +357,28 @@ def classify_location(
                 address_city = city_for_locality(canonical_locality(company_address))
             if address_city:
                 actual_district = CITY_DISTRICTS.get(address_city)
+                if not actual_district and requested_geocoded_city and _normalize(address_city) != _normalize(requested_geocoded_city):
+                    # address_city is seeded (CITY_ALIASES) but CITY_DISTRICTS
+                    # was never taught its district (true for most cities added
+                    # from real query history, e.g. Pune, Hyderabad) - a direct
+                    # city-vs-city mismatch against the geocoded request is
+                    # still real evidence even without that district entry.
+                    # Matters before enrichment has run at all (GoogleMapsProvider's
+                    # search-time filter): only raw address text is available then,
+                    # never a geocoded/structured company field.
+                    return "outside", (
+                        f"address names '{address_city}', not requested district's city '{requested_geocoded_city}'"
+                    )
         if actual_district:
             if _normalize(actual_district) == _normalize(requested_district):
                 return "match", f"company district '{actual_district}' matches requested district '{requested_district}'"
             return "outside", f"resolved district '{actual_district}' does not match requested district '{requested_district}'"
+        conflicting_state = _state_conflict(company_state, company_address, requested_state_hint)
+        if conflicting_state:
+            return "outside", (
+                f"resolved state '{conflicting_state}' does not match '{requested_state_hint}' "
+                f"(state of requested district '{requested_district}')"
+            )
         return "unknown", "company district could not be determined"
 
     # A known locality is more specific than a city.  A city-level record is
@@ -262,12 +392,40 @@ def classify_location(
             if _normalize(actual_locality) == _normalize(requested_locality):
                 return "match", f"company locality '{actual_locality}' matches requested locality '{requested_locality}'"
             return "outside", f"resolved locality '{actual_locality}' does not match requested locality '{requested_locality}'"
+        # No specific locality match either way - but the *city* the address
+        # or structured field actually names is still real evidence, even
+        # without a seeded locality hit. Needed for a requested city whose
+        # district name differs from the city name (Bengaluru, Hosur):
+        # canonical_district(requested) doesn't match "Peenya, Bengaluru" at
+        # all, landing here instead of the district branch above - without
+        # this, a different city plainly named in the address (e.g. a
+        # Chennai company surfaced by a Bengaluru locality search) would
+        # only ever come back "unknown", never "outside".
+        requested_locality_city = city_for_locality(requested_locality)
+        address_city = actual_city or canonical_city(company_address)
+        if requested_locality_city and address_city and _normalize(address_city) != _normalize(requested_locality_city):
+            return "outside", (
+                f"resolved city '{address_city}' does not match '{requested_locality_city}' "
+                f"(parent city of requested locality '{requested_locality}')"
+            )
+        conflicting_state = _state_conflict(company_state, company_address, requested_state_hint)
+        if conflicting_state:
+            return "outside", (
+                f"resolved state '{conflicting_state}' does not match '{requested_state_hint}' "
+                f"(state of requested locality '{requested_locality}')"
+            )
         return "unknown", "company locality could not be determined"
 
     # Not a recognised state, district, or locality - treat the request as a city.
-    requested_canonical = canonical_city(requested) or _normalize(requested)
+    # Normalized even when canonical_city() (or the geocoded override)
+    # already resolved a proper-cased name (e.g. "Ahmedabad") - comparing
+    # that directly against an unseeded side's lowercase _normalize()
+    # fallback would make the equality/substring/fuzzy checks below silently
+    # case-sensitive, weakening every comparison purely because one side
+    # happened to be in CITY_ALIASES and the other wasn't.
+    requested_canonical = _normalize(canonical_city(requested) or requested_geocoded_city or requested)
     if company_city:
-        actual_canonical = canonical_city(company_city) or _normalize(company_city)
+        actual_canonical = _normalize(canonical_city(company_city) or company_city)
         if actual_canonical == requested_canonical or requested_canonical in actual_canonical or actual_canonical in requested_canonical:
             return "match", f"company city '{company_city}' matches requested '{requested}'"
         # A typo or minor spelling variant of the SAME place ("Ahmedabad" vs
@@ -309,6 +467,10 @@ def classify_location(
                 f"address names locality '{address_locality}' (in {locality_city}), "
                 f"not requested '{requested}'"
             )
+
+    conflicting_state = _state_conflict(company_state, company_address, requested_state_hint)
+    if conflicting_state:
+        return "outside", f"resolved state '{conflicting_state}' does not match '{requested_state_hint}' (state of requested '{requested}')"
 
     return "unknown", "company city could not be determined"
 

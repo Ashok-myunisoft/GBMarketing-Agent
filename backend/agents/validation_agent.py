@@ -12,6 +12,7 @@ from agents.base_agent import BaseClass
 from config.geography import classify_location
 from config.targeting import match_target_industry, parse_turnover_range
 from schemas.company import Company
+from services.geocoding_service import GeoapifyGeocodingService
 from services.mlead.repository import MleadRepository
 
 
@@ -33,6 +34,9 @@ class ValidationAgent(BaseClass):
     Public directories rarely expose financials or headcount, so missing data is
     marked as unverified instead of silently excluding an otherwise useful lead.
     """
+
+    def __init__(self, geocoder: Optional[GeoapifyGeocodingService] = None):
+        self._geocoder = geocoder or GeoapifyGeocodingService()
 
     def execute(
         self,
@@ -83,6 +87,17 @@ class ValidationAgent(BaseClass):
         no_identifier_count = 0
         removed: list[dict] = []
 
+        # Geocoded once here, for the whole run - never per company - since
+        # `requested_location` is the same string for every company in this
+        # batch. Lets classify_location() work at full district/city
+        # precision for a requested city outside the small hand-picked
+        # CITY_ALIASES/CITY_DISTRICTS seed lists (e.g. "Nagpur") instead of
+        # only the narrower state-level fallback those lists leave it to.
+        # A no-op (None) whenever GEOAPIFY_API_KEY isn't configured or the
+        # lookup fails - every classify_location call below already
+        # degrades to its pre-existing seed-list-only behavior in that case.
+        requested_geocoded = self._geocoder.geocode(requested_location) if requested_location else None
+
         for company in companies:
             name = company.company_name or "(unnamed)"
             keys = self._company_keys(company)
@@ -115,6 +130,9 @@ class ValidationAgent(BaseClass):
                     requested_location,
                     company_district=company.district,
                     company_locality=company.locality,
+                    requested_geocoded_state=requested_geocoded.state if requested_geocoded else None,
+                    requested_geocoded_district=requested_geocoded.district if requested_geocoded else None,
+                    requested_geocoded_city=requested_geocoded.city if requested_geocoded else None,
                 )
                 logger.info(
                     "[LOCATION] requested=%s company=%s resolved_city=%s resolved_state=%s decision=%s reason=%s",

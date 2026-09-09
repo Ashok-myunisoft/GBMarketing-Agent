@@ -1031,7 +1031,3 @@ class EnrichmentAgent(BaseClass):
 
         return None
 
-    # Contact-person/designation extraction (name shape, designation
-    # canonicalization, candidate scoring/dedupe, and the per-container
-    # LinkedIn-URL lookup that used to live here) now lives in
-    # services/contact_extraction/ - see ContactExtractionPipeline above.
