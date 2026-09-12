@@ -13,9 +13,15 @@ class SourceCandidate:
     currency: Optional[str] = None
     financial_year: Optional[str] = None
     metric: Optional[str] = None
-    # ``scraped_page`` is evidence fetched through Firecrawl.  A snippet is
-    # retained only as explicitly-labelled last-resort evidence.
+    # "ai_web_search" is the OpenAI Responses API's own web-search research
+    # (see openai_research_client.py) - the sole GST/turnover mechanism now.
     source_type: str = "scraped_page"
+    # Short surrounding text (~1-2 lines) the value was actually found in -
+    # lets ai_validator.py judge whose identity a GSTIN/turnover figure
+    # belongs to, or reject a non-turnover financial metric, instead of
+    # seeing only a bare value. Always optional/best-effort: an empty string
+    # means no snippet was captured, never a required field.
+    evidence: str = ""
 
 
 @dataclass

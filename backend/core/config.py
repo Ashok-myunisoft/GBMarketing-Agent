@@ -140,11 +140,32 @@ class Settings:
         1, int(os.getenv("FIRECRAWL_SEARCH_QUOTA_COOLDOWN_SECONDS", "300"))
     )
 
-    # Crawl4AI is a fallback for GST/turnover only, used when Firecrawl fails,
-    # errors, times out, or returns content the existing GST/turnover
-    # extraction can't find a value in. Firecrawl always remains primary.
+    # Self-hosted SearXNG instance - the search/discovery layer for GST/
+    # turnover enrichment only (services/gst_turnover_enrichment/service.py),
+    # replacing Firecrawl Cloud Search in that one path. Firecrawl itself is
+    # untouched everywhere else (Tavily's PDF/page fetching, GST/turnover's
+    # own Crawl4AI-fallback website scrape, etc.) - see FIRECRAWL_API_URL
+    # above. In Docker, this resolves via the external `searxng_default`
+    # network (see docker-compose.yml); for local dev without that network,
+    # override to "http://localhost:8080" (or wherever SearXNG is reachable).
+    SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080")
+    SEARXNG_TIMEOUT_SECONDS = max(1, int(os.getenv("SEARXNG_TIMEOUT_SECONDS", "20")))
+
+    # Crawl4AI is a fallback for GST/turnover only, used when the primary
+    # search/scrape doesn't resolve. Its own website-crawl tier is used
+    # regardless of the search provider; the search-then-crawl tier now
+    # discovers candidate URLs via SearXNG rather than Firecrawl Search.
     CRAWL4AI_ENABLED = os.getenv("CRAWL4AI_ENABLED", "true").lower() == "true"
     CRAWL4AI_TIMEOUT_SECONDS = max(1, int(os.getenv("CRAWL4AI_TIMEOUT_SECONDS", "30")))
+
+    # Real OpenAI Responses API - GST/turnover's search+extraction mechanism
+    # (services/gst_turnover_enrichment/openai_research_client.py), replacing
+    # SearXNG+Crawl4AI in that one path. Deliberately separate from
+    # OPENAI_API_KEY/OPENAI_MODEL above, which are actually RunPod credentials
+    # (see LLMService) used by unrelated AI features - never repurpose those.
+    OPENAI_RESEARCH_API_KEY = os.getenv("OPENAI_RESEARCH_API_KEY", "")
+    OPENAI_RESEARCH_MODEL = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-4.1-mini")
+    OPENAI_RESEARCH_TIMEOUT_SECONDS = max(1, int(os.getenv("OPENAI_RESEARCH_TIMEOUT_SECONDS", "60")))
 
 
     DATABASE_URL = os.getenv("DATABASE_URL")

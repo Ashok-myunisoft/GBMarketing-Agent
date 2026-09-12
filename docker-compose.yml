@@ -15,3 +15,16 @@ services:
       - ./.env
 
     restart: unless-stopped
+
+    # `default` keeps this service's existing (implicit) network attachment;
+    # `searxng_default` is the already-running SearXNG instance's external
+    # network, added only so the backend can resolve http://searxng:8080
+    # for GST/turnover search (see SEARXNG_URL in .env). No new ports are
+    # exposed - SearXNG is already published on the host at :8080.
+    networks:
+      - default
+      - searxng_default
+
+networks:
+  searxng_default:
+    external: true

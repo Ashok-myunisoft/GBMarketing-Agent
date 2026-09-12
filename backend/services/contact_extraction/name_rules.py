@@ -12,6 +12,7 @@ scoring can't confidently pick between candidates, not for name shape itself.
 import re
 
 from services.contact_extraction.designation_rules import is_exact_match as _is_known_designation
+from services.contact_extraction.designation_rules import strip_known_designation_prefix
 
 # Same stoplist EnrichmentAgent used (moved here, not duplicated elsewhere):
 # rejects company/nav/product words that would otherwise pass the shape
@@ -88,6 +89,17 @@ def is_person_name(value: str) -> bool:
     # because both of its words individually pass the per-token checks
     # below (neither "Managing" nor "Director" is in NAME_EXCLUDE_WORDS).
     if _is_known_designation(" ".join(core)):
+        return False
+
+    # A title concatenated directly against a name with no separator at all
+    # ("Managing Director John Smith") isn't a whole-string designation
+    # match above, and neither "Managing" nor "Director" individually looks
+    # like company/nav text - without this, it would wrongly pass as a
+    # plain 4-word name with the title text still embedded in it. Callers
+    # that want the (name, designation) split instead of an outright
+    # rejection should use strip_known_designation_prefix() themselves
+    # before falling back to this check.
+    if strip_known_designation_prefix(" ".join(core))[1]:
         return False
 
     real_words = 0

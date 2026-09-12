@@ -122,6 +122,34 @@ def canonical_designation(raw_title: str) -> "str | None":
     return None
 
 
+def strip_known_designation_prefix(raw_title: str) -> "tuple[str, str | None]":
+    """If `raw_title` starts with a known designation phrase followed by
+    more words, returns (remaining_text, canonical_designation) with that
+    leading phrase removed; otherwise (raw_title, None).
+
+    Covers a title concatenated directly against a name with no separator
+    at all ("Managing Director John Smith"), which name_rules.is_person_name
+    would otherwise wrongly accept as a single 4-word name (neither
+    "Managing" nor "Director" individually looks like company/nav text, and
+    the whole string never equals a known designation exactly, so the
+    existing whole-string check in is_person_name doesn't catch it). Only a
+    *prefix* match counts - a name that merely contains a title-like word
+    elsewhere isn't split.
+    """
+    words = (raw_title or "").strip().split()
+    if len(words) < 2:
+        return raw_title, None
+    lowered_words = [word.lower() for word in words]
+    for term, canonical in _TERMS_BY_LENGTH_DESC:
+        term_words = term.split()
+        count = len(term_words)
+        if not count or count >= len(words):
+            continue
+        if lowered_words[:count] == term_words:
+            return " ".join(words[count:]), canonical
+    return raw_title, None
+
+
 def is_exact_match(raw_title: str) -> bool:
     """True when `raw_title` itself is a known title/alias, rather than a
     longer piece of free text that merely *contains* one as a substring.

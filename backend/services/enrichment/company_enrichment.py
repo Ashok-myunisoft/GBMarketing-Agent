@@ -301,11 +301,16 @@ class CompanyTavilyEnrichmentService:
             crawled_pdfs=pdfs or [],
         )
 
+        # A rejected contact_person (e.g. the LLM returned a bare title like
+        # "Managing Director" with no name attached) must not also discard a
+        # legitimately-extracted designation - the two are validated and
+        # applied independently.
         contact = contact_validator.validate(record.contact_person)
+        designation = designation_validator.validate(record.designation) if record.designation else None
         if contact:
             result.contact_person = contact
-            result.designation = designation_validator.validate(record.designation) if record.designation else None
             result.contact_source_url = record.source_url.get("contact_person", "tavily")
+        result.designation = designation
 
         for field_name in _MERGE_FIELDS:
             setattr(result, field_name, getattr(record, field_name))

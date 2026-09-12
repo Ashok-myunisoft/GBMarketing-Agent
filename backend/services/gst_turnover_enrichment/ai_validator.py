@@ -1,7 +1,7 @@
 """
 Step 3: AI validation. The model never searches the internet and never
 invents a value - it only compares candidates already found deterministically
-by the website (Firecrawl) and jamku turnover tiers and picks the one with
+by the website (Crawl4AI/SearXNG) and jamku turnover tiers and picks the one with
 the strongest supporting evidence. Mirrors the existing contact-disambiguation pattern
 (services/contact_extraction/llm_disambiguator.py): gated by a settings
 flag, degrades to the top-scored deterministic candidate on any failure,
@@ -18,8 +18,11 @@ from services.prompt_service import PromptService
 
 logger = logging.getLogger(__name__)
 
-# (value, confidence, sources)
-RankedCandidate = "tuple[str, int, list[str]]"
+# (value, confidence, sources, evidence). ``evidence`` is a short
+# surrounding-text snippet the value was found in - always present in the
+# tuple, but may be an empty string when no snippet was captured for that
+# candidate (never a required field).
+RankedCandidate = "tuple[str, int, list[str], str]"
 
 
 def validate(field_name: str, company_name: str, ranked_values: "list[RankedCandidate]") -> "str | None":
@@ -52,8 +55,11 @@ def validate(field_name: str, company_name: str, ranked_values: "list[RankedCand
 
 def _build_user_prompt(field_name: str, company_name: str, ranked_values: "list[RankedCandidate]") -> str:
     lines = [f"Company: {company_name}", f"Field: {field_name}", "Candidates:"]
-    for index, (value, confidence, sources) in enumerate(ranked_values):
-        lines.append(f"{index}. Value: {value} | Confidence: {confidence} | Sources: {', '.join(sources)}")
+    for index, (value, confidence, sources, evidence) in enumerate(ranked_values):
+        line = f"{index}. Value: {value} | Confidence: {confidence} | Sources: {', '.join(sources)}"
+        if evidence:
+            line += f' | Evidence: "{evidence}"'
+        lines.append(line)
     return "\n".join(lines)
 
 

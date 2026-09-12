@@ -937,6 +937,54 @@ def parse_turnover_range(
 
 
 # ============================================================
+# TURNOVER -> CRORE (unit-aware)
+# ============================================================
+
+# Same unit vocabulary services/gst_turnover_enrichment/turnover_extraction.py
+# produces ("crore|cr|lakh|lac|lakhs|million|mn|billion|bn") - unlike
+# parse_turnover_range above (which assumes every figure is already in Cr,
+# fine for its own use validating against a user-specified Cr floor), this
+# is unit-aware: "128 Million" and "128 Crore" are NOT the same magnitude
+# (128 Million = 12.8 Cr), and blindly treating them the same would silently
+# write a wrong number into any numeric column driven off this.
+_TURNOVER_UNIT_TO_CRORE = {
+    "crore": 1.0, "cr": 1.0,
+    "lakh": 0.01, "lac": 0.01, "lakhs": 0.01,
+    "million": 0.1, "mn": 0.1,
+    "billion": 100.0, "bn": 100.0,
+}
+_TURNOVER_VALUE_UNIT_RE = re.compile(
+    r"([\d.]+)\s*(crore|cr\.?|lakh|lac|lakhs|million|mn|billion|bn)\b",
+    re.IGNORECASE,
+)
+
+
+def turnover_to_crore(text: str | None) -> float | None:
+    """Converts a turnover figure/slab string (e.g. "128 Crore", "50
+    Million", or a jamku slab "5 Cr to 25 Cr") into a single number in
+    Crore (Rs 1,00,00,000), doing real unit conversion rather than
+    assuming every number is already in Cr. Returns None when nothing
+    with a recognizable unit is found - never guesses a unit.
+
+    For a slab/range, returns the LOWER bound - conservative, so a range
+    this can't resolve to one exact figure is never overstated.
+    """
+    if not text:
+        return None
+    matches = _TURNOVER_VALUE_UNIT_RE.findall(text.replace(",", ""))
+    crore_values = []
+    for raw_value, unit in matches:
+        multiplier = _TURNOVER_UNIT_TO_CRORE.get(unit.rstrip(".").lower())
+        if multiplier is None:
+            continue
+        try:
+            crore_values.append(float(raw_value) * multiplier)
+        except ValueError:
+            continue
+    return min(crore_values) if crore_values else None
+
+
+# ============================================================
 # TURNOVER BAND
 # ============================================================
 

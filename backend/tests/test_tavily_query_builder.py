@@ -13,7 +13,7 @@ class QueryBuilderTests(unittest.TestCase):
 
     def test_initial_queries_exclude_gst_turnover_terms(self):
         # GST/turnover discovery no longer goes through Tavily at all (see
-        # services/gst_turnover_enrichment - Firecrawl-only now).
+        # services/gst_turnover_enrichment - its own SearXNG/Crawl4AI path).
         queries = " ".join(build_initial_queries("Example Pumps Pvt Ltd"))
         for term in ("GSTIN", "GST", "Turnover", "Revenue", "Annual Report"):
             self.assertNotIn(term, queries)

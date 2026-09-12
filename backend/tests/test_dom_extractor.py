@@ -216,6 +216,44 @@ class DomExtractorTests(unittest.TestCase):
 
         self.assertEqual(candidates, [])
 
+    def test_container_heading_with_title_concatenated_directly_against_name(self):
+        """A heading like "Managing Director John Smith" (title and name
+        with no separator at all - no dash, comma, or line break) must be
+        split into (name, designation), not lost entirely or kept with the
+        title text still embedded in the name."""
+
+        card = _FakeElement(
+            "div",
+            class_attr="team-member-card",
+            text="Managing Director John Smith",
+            children=[_FakeElement("h3", text="Managing Director John Smith")],
+        )
+        page = _FakePage(_FakeElement("body", children=[card]), "https://example.com/leadership")
+
+        candidates = dom_extractor.extract_candidates(page, page.url, PageCategory.LEADERSHIP)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].name, "John Smith")
+        self.assertEqual(candidates[0].canonical_designation, "Managing Director")
+
+    def test_text_block_fallback_recovers_name_from_a_concatenated_neighbour(self):
+        """Same title-concatenated-with-no-separator case, reached via the
+        text-block fallback: the exact-match designation line ("CEO") stays
+        the title, and the neighbouring line's own leading title-prefix is
+        stripped to recover a usable name."""
+
+        body = _FakeElement(
+            "body",
+            text="CEO\nManaging Director John Smith",
+        )
+        page = _FakePage(body, "https://example.com/about")
+
+        candidates = dom_extractor.extract_candidates(page, page.url, PageCategory.ABOUT)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].name, "John Smith")
+        self.assertEqual(candidates[0].canonical_designation, "CEO")
+
     def test_generic_card_with_a_fuzzy_match_is_accepted_when_corroborated(self):
         """The same fuzzy-match generic card as above is accepted once it
         carries an actual contact signal (here, an email) - corroboration,

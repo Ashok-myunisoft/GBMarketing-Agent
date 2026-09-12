@@ -1,7 +1,7 @@
 """Tests for GET /jobs/{job_id}/export.
 
 Per the updated business requirement, the download endpoint exports the
-COMPLETE current contents of PostgreSQL public.mlead - never just the
+COMPLETE current contents of PostgreSQL public."TLead" - never just the
 leads newly extracted by that particular job. job_id is used only to
 verify the job exists and has completed. These tests use a
 FakeMleadRepository (implementing only the read-only surface the
@@ -59,7 +59,7 @@ class FakeMleadRepository:
         return list(self._leads)
 
     def save(self, *args, **kwargs):
-        raise AssertionError("Download must not write to public.mlead")
+        raise AssertionError('Download must not write to public."TLead"')
 
 
 class ExportDownloadEndpointTests(unittest.TestCase):

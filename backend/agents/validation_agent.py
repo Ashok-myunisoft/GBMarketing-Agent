@@ -10,7 +10,7 @@ import logging
 
 from agents.base_agent import BaseClass
 from config.geography import classify_location
-from config.targeting import match_target_industry, parse_turnover_range
+from config.targeting import match_target_industry, parse_turnover_range, turnover_to_crore
 from schemas.company import Company
 from services.geocoding_service import GeoapifyGeocodingService
 from services.mlead.repository import MleadRepository
@@ -24,7 +24,7 @@ MASTER_EXPORT_PATH = BACKEND_DIR / "exports" / "All_Extracted_Leads.xlsx"
 
 # Single shared repository instance - a thin, stateless-per-call wrapper
 # around a PostgreSQL connection to the EXISTING production table
-# public.mlead (see services/mlead/repository.py). Not a new table.
+# public."TLead" (see services/mlead/repository.py). Not a new table.
 _mlead_repository = MleadRepository()
 
 
@@ -55,7 +55,7 @@ class ValidationAgent(BaseClass):
             existing_keys.update(self._load_existing_keys(MASTER_EXPORT_PATH))
 
         # Persistent baseline: existing production leads in PostgreSQL
-        # public.mlead (~136 historical rows plus anything since accepted),
+        # public."TLead" (~136 historical rows plus anything since accepted),
         # so history survives container stop/restart/recreate (the
         # file-based baseline above lives inside the container). Reuses
         # the exact same _company_keys matching used everywhere else in
@@ -119,6 +119,19 @@ class ValidationAgent(BaseClass):
                     "company_name": name,
                     "reason": "already present in the existing export / dedup baseline",
                 })
+                # This run's enrichment may have found a field (GST,
+                # turnover, contact info, ...) the existing mlead row never
+                # had - backfill it even though this company isn't a new
+                # lead, rather than silently discarding freshly-found data
+                # just because it isn't new. Only applies when the match is
+                # against the mlead baseline specifically (postgres_key_to_id) -
+                # a match against only the file-based baseline has no live
+                # database row to update.
+                existing_lead_id = next(
+                    (postgres_key_to_id[key] for key in keys if key in postgres_key_to_id), None
+                )
+                if existing_lead_id is not None:
+                    self._backfill_mlead(existing_lead_id, company)
                 continue
 
             location_note = None
@@ -308,7 +321,7 @@ class ValidationAgent(BaseClass):
         return keys
 
     def _load_mlead_rows(self) -> list[dict]:
-        """Read the PostgreSQL public.mlead baseline.
+        """Read the PostgreSQL public."TLead" baseline.
 
         Failures are logged and treated as "no persistent history for this
         run" rather than raised, so a temporarily unreachable database
@@ -321,29 +334,36 @@ class ValidationAgent(BaseClass):
         try:
             return _mlead_repository.fetch_all()
         except Exception:
-            logger.exception("mlead: failed to read PostgreSQL baseline (public.mlead); continuing without it")
+            logger.exception('mlead: failed to read PostgreSQL baseline (public."TLead"); continuing without it')
             return []
 
     def _remember_in_mlead(self, company: Company, keys: set[str], postgres_key_to_id: dict[str, int]) -> None:
-        """Persist an accepted lead into public.mlead so future runs
+        """Insert a newly accepted lead into public."TLead" so future runs
         (including after a container restart) recognise it via the
         existing dedup keys.
 
-        If a matching row already exists (per the same keys used for the
-        dedup check above), nothing is written - this avoids creating an
-        unnecessary duplicate row in the 136-row production table.
+        Only ever called for a company that is NOT a match against the
+        existing baseline - execute()'s dedup check handles the "already
+        exists, but may still have new data worth saving" case itself via
+        _backfill_mlead(), before a company could ever reach here as a
+        duplicate. So this always performs a fresh insert, never a lookup.
 
         Never raises - a persistence failure must not fail an otherwise
         successful validation/export run, but is always logged clearly.
         """
         try:
-            existing_id = next((postgres_key_to_id[key] for key in keys if key in postgres_key_to_id), None)
-            if existing_id is not None:
-                logger.debug("mlead: lead already present as lead_id=%s, skipping insert", existing_id)
-                return
             new_id = _mlead_repository.save(
                 company_name=company.company_name or "",
                 gst=company.gst,
+                # public."TLead"'s turn_over column is NUMERIC - this
+                # pipeline's turnover values are always a text label
+                # ("128 Crore", "50 Million", a jamku slab like "5 Cr to
+                # 25 Cr"), never a bare number, so the raw string can't be
+                # written directly. turnover_to_crore() does real unit
+                # conversion (128 Million is 12.8 Cr, not 128) and returns
+                # the lower bound for a slab/range; None when nothing
+                # convertible is found, which just leaves the column blank.
+                turnover=turnover_to_crore(company.turnover),
                 website_url=company.website,
                 mobile_number=company.phone,
                 alternate_mobile_number=company.phone_alt,
@@ -362,8 +382,41 @@ class ValidationAgent(BaseClass):
                 postgres_key_to_id[key] = new_id
         except Exception:
             logger.exception(
-                "mlead: failed to persist accepted lead '%s' to PostgreSQL (public.mlead)",
+                'mlead: failed to persist accepted lead \'%s\' to PostgreSQL (public."TLead")',
                 company.company_name,
+            )
+
+    def _backfill_mlead(self, lead_id: int, company: Company) -> None:
+        """Fills in any blank column on an EXISTING mlead row with this
+        company's freshly found data (GST, turnover, contact info, ...),
+        without ever overwriting a column the row already has - called
+        from execute()'s dedup check for a company that matches the
+        baseline but may still have new data worth saving.
+
+        Never raises - a persistence failure must not fail an otherwise
+        successful validation/export run, but is always logged clearly.
+        """
+        try:
+            _mlead_repository.backfill_blank_fields(
+                lead_id,
+                gst=company.gst,
+                turnover=turnover_to_crore(company.turnover),
+                website_url=company.website,
+                mobile_number=company.phone,
+                alternate_mobile_number=company.phone_alt,
+                email_id=company.email,
+                city=company.city,
+                address=company.address,
+                industry_type=company.industry,
+                region=company.region,
+                contact_person=company.contact_person,
+                designation=company.designation,
+                remarks=company.remarks,
+            )
+        except Exception:
+            logger.exception(
+                "mlead: failed to backfill existing lead_id=%s for '%s'",
+                lead_id, company.company_name,
             )
 
     def _load_existing_keys(self, path: Path) -> set[str]:

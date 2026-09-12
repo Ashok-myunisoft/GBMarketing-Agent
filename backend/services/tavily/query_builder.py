@@ -9,8 +9,9 @@ build_refined_queries() is used only on the confidence-gated retry pass
 GST/turnover-specific queries (GSTIN, GST certificate, Annual Turnover,
 Annual Report, revenue from operations, Financial Statements) were removed
 from both lists - that pair no longer comes from this pipeline at all (see
-services/gst_turnover_enrichment, Firecrawl-only now), so searching for them
-here would just spend Tavily quota on results nothing reads.
+services/gst_turnover_enrichment, which has its own SearXNG/Crawl4AI search
+and crawl), so searching for them here would just spend Tavily quota on
+results nothing reads.
 """
 
 

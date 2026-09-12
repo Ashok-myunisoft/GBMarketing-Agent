@@ -33,6 +33,15 @@ Director > CEO > Founder > Owner > Partner > Chairman > Managing Partner.
 If none of those titles are present, choose the highest-ranking executive
 actually named.
 
+`contact_person` must be an actual person's name, never a job title. If the
+document names a person together with their title (e.g. "Rajesh Kumar -
+Managing Director"), set `contact_person` to the person's name only and
+`designation` to their title. If only a title/role appears with no person's
+name attached anywhere in the document (e.g. the document just says
+"Managing Director" or "Contact our Sales Team"), set `contact_person` to
+`null` but still set `designation` to that title/role if it is genuinely
+present - a missing name is not a reason to also discard a valid title.
+
 Rules:
 
 - Return ONLY valid JSON. No markdown, no explanation, no extra text.

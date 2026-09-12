@@ -82,6 +82,23 @@ STATE_NAMES = (
     "Haryana", "Goa", "Puducherry",
 )
 
+# CBIC's public GSTIN state-code prefixes (a GSTIN's first 2 digits) - used
+# only to demote (never outright reject) a GST candidate whose registered
+# state contradicts the company's own known state. A company's GST
+# registration state can legitimately differ from its operational address
+# for real, non-fraudulent reasons (multi-state registration, a corporate
+# office elsewhere), so this is deliberately a soft signal, not a hard rule.
+GST_STATE_CODES: dict[str, str] = {
+    "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab",
+    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan",
+    "09": "Uttar Pradesh", "10": "Bihar", "19": "West Bengal",
+    "20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh",
+    "23": "Madhya Pradesh", "24": "Gujarat", "27": "Maharashtra",
+    "28": "Andhra Pradesh", "29": "Karnataka", "30": "Goa",
+    "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry",
+    "36": "Telangana", "37": "Andhra Pradesh",
+}
+
 # Real state for each seeded city - used only to catch a company confidently
 # placed in a *different* state (e.g. a Delhi or Mumbai listing surfaced by a
 # loosely geo-scoped Coimbatore search). STATE_NAMES already covers all of
@@ -270,6 +287,31 @@ def _state_conflict(
     actual_state = company_state or _state_name(company_address)
     if actual_state and _normalize(actual_state) != _normalize(requested_state_hint):
         return actual_state
+    return None
+
+
+def gst_state_conflict(
+    gstin: Optional[str], company_state: Optional[str], company_address: Optional[str] = None,
+) -> Optional[str]:
+    """Returns the GSTIN's registered state if it confidently differs from
+    the company's own known state, else None (including when either side
+    is unknown/unrecognised).
+
+    Same "only assert on positive conflicting evidence" shape as
+    _state_conflict above - a public counterpart for services outside this
+    module (GST/turnover candidate ranking) to demote, never outright
+    reject, a GSTIN whose state-code prefix contradicts the company's known
+    state. This is a soft signal: a company can legitimately hold a GST
+    registration in a state other than its operational address.
+    """
+    if not gstin or len(gstin) < 2:
+        return None
+    implied_state = GST_STATE_CODES.get(gstin[:2])
+    if not implied_state:
+        return None
+    actual_state = company_state or _state_name(company_address)
+    if actual_state and _normalize(actual_state) != _normalize(implied_state):
+        return implied_state
     return None
 
 

@@ -9,7 +9,7 @@ unverified claim.
 from urllib.parse import urlparse
 from services.gst_turnover_enrichment.models import SourceCandidate
 
-GST_SOURCE_POINTS = {"authoritative": 95, "official_document": 92, "annual_report": 90, "filesure": 85, "website": 82, "pdf": 80, "search": 80}
+GST_SOURCE_POINTS = {"authoritative": 95, "official_document": 92, "annual_report": 90, "ai_web_search": 88, "filesure": 85, "website": 82, "pdf": 80, "search": 80}
 
 # "Annual Report" and "Company PDF" are scored separately per the spec's own
 # table - a PDF is only tagged "annual_report" when its link text/URL says
@@ -20,7 +20,7 @@ GST_SOURCE_POINTS = {"authoritative": 95, "official_document": 92, "annual_repor
 # derived from the GST portal's own filing data rather than a self-reported
 # figure, but only ever a coarse range, not an exact number - scored above a
 # generic scraped page/PDF but below an annual report's exact figure.
-TURNOVER_SOURCE_POINTS = {"annual_report": 95, "official_document": 92, "filesure": 85, "jamku": 85, "website": 80, "pdf": 80, "search": 80}
+TURNOVER_SOURCE_POINTS = {"annual_report": 95, "official_document": 92, "ai_web_search": 88, "filesure": 85, "jamku": 85, "website": 80, "pdf": 80, "search": 80}
 
 MATCHING_BONUS = 30
 MAX_CONFIDENCE = 100

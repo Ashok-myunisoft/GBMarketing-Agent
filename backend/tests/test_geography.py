@@ -6,6 +6,7 @@ from config.geography import (
     canonical_city,
     city_for_locality,
     classify_location,
+    gst_state_conflict,
     hierarchy_ids,
     location_query_variants,
 )
@@ -247,6 +248,30 @@ class ClassifyLocationTests(unittest.TestCase):
         )
         self.assertEqual(decision, "outside")
         self.assertIn("Chennai", reason)
+
+
+class GstStateConflictTests(unittest.TestCase):
+    def test_matching_state_is_not_a_conflict(self):
+        self.assertIsNone(gst_state_conflict("27AAPFU0939F1ZV", "Maharashtra"))
+
+    def test_different_state_is_a_conflict(self):
+        # "27" is Maharashtra's GST state-code prefix.
+        self.assertEqual(gst_state_conflict("27AAPFU0939F1ZV", "Tamil Nadu"), "Maharashtra")
+
+    def test_state_recovered_from_address_when_state_field_is_blank(self):
+        self.assertEqual(
+            gst_state_conflict("27AAPFU0939F1ZV", None, "Some Street, Tamil Nadu"), "Maharashtra",
+        )
+
+    def test_unknown_company_state_is_not_a_conflict(self):
+        self.assertIsNone(gst_state_conflict("27AAPFU0939F1ZV", None, None))
+
+    def test_missing_or_too_short_gstin_is_not_a_conflict(self):
+        self.assertIsNone(gst_state_conflict(None, "Tamil Nadu"))
+        self.assertIsNone(gst_state_conflict("2", "Tamil Nadu"))
+
+    def test_unrecognised_state_code_is_not_a_conflict(self):
+        self.assertIsNone(gst_state_conflict("99AAPFU0939F1ZV", "Tamil Nadu"))
 
 
 class CityForLocalityTests(unittest.TestCase):

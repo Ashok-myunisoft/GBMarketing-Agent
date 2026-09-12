@@ -106,11 +106,11 @@ def get_lead(lead_id: str):
 
 @router.get("/jobs/{job_id}/export")
 def download_export(job_id: str):
-    """Downloads the COMPLETE current public.mlead dataset as XLSX.
+    """Downloads the COMPLETE current public."TLead" dataset as XLSX.
 
     job_id is used ONLY to verify the requested job exists and has
     completed - per the updated business requirement, the exported
-    dataset is always ALL of public.mlead (the permanent source of
+    dataset is always ALL of public."TLead" (the permanent source of
     truth), never just this job's newly extracted leads. See
     MleadRepository.get_all_leads().
 

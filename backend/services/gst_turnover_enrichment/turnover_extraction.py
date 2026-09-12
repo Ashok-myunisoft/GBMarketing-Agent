@@ -24,8 +24,16 @@ _FINANCIAL_YEAR = re.compile(r"\b(?:FY\s*)?(\d{4})\s*[-/]\s*(\d{2,4})\b", re.IGN
 
 _MAX_CANDIDATES = 5
 _WINDOW_LINES = 2
+# Financial metrics that are NOT turnover/revenue/sales, even when they
+# appear near one of those words (e.g. a P&L table listing "Total Revenue"
+# then "Net Profit" within the same window). Deliberately excludes profit/
+# EBITDA/PAT/net worth/assets/funding/valuation/capacity/headcount figures,
+# which are easy to mistake for turnover but represent something else
+# entirely.
 _NON_TURNOVER_CONTEXT = re.compile(
-    r"\b(project|order|contract|market\s+size|investment|paid[- ]up|authorized)\b",
+    r"\b(project|order|contract|market\s+size|investment|paid[- ]up|authorized|"
+    r"profit|ebitda|pat|net\s+worth|total\s+assets|funding|valuation|"
+    r"production\s+capacity|installed\s+capacity|employees?|headcount)\b",
     re.IGNORECASE,
 )
 
@@ -35,6 +43,7 @@ class TurnoverCandidate(TypedDict):
     currency: Optional[str]
     financial_year: Optional[str]
     metric: str
+    evidence: str
 
 
 def find_turnover_candidates(text: Optional[str], max_candidates: int = _MAX_CANDIDATES) -> list[TurnoverCandidate]:
@@ -77,7 +86,10 @@ def find_turnover_candidates(text: Optional[str], max_candidates: int = _MAX_CAN
         if key in seen:
             continue
         seen.add(key)
-        candidates.append({"value": value, "currency": "INR", "financial_year": financial_year, "metric": metric})
+        candidates.append({
+            "value": value, "currency": "INR", "financial_year": financial_year, "metric": metric,
+            "evidence": window.strip()[:300],
+        })
 
         if len(candidates) >= max_candidates:
             break

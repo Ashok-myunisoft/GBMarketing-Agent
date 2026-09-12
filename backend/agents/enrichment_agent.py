@@ -130,10 +130,12 @@ class EnrichmentAgent(BaseClass):
         # plain text somewhere. Used below only for whatever GST/turnover
         # resolution still hasn't filled in.
         self._turnover = turnover or GstTurnoverService(self._browser)
-        # Plain HTTPS API, no Playwright involved - the sole content-fetch
-        # mechanism for GST/turnover (see services/gst_turnover_enrichment).
+        # Plain HTTPS API, no Playwright involved - used by Tavily's own PDF
+        # fetching below (services/enrichment/company_enrichment.py), not by
+        # GST/turnover (see services/gst_turnover_enrichment, which searches
+        # via SearXNG and crawls via Crawl4AI instead).
         self._firecrawl = firecrawl or FirecrawlClient()
-        self._gst_turnover = GstTurnoverEnrichmentService(self._browser, self._firecrawl)
+        self._gst_turnover = GstTurnoverEnrichmentService(self._browser)
         # Tavily's gather() also drives a Playwright browser of its own for
         # some of its page fetches (services/crawler/html_crawler.py), and
         # Playwright's sync API only tolerates being driven from the single
@@ -336,11 +338,13 @@ class EnrichmentAgent(BaseClass):
         address = address or tavily_result.address
         official_url = official_url or tavily_result.website
 
-        # GST Number and Turnover: the company's own website via Firecrawl,
-        # followed by the jamku turnover-slab fallback. No Tavily, no Google
-        # search is used. A value already on the record (from a prior
-        # run/import) is used as-is; the multi-tier lookup only runs for
-        # whatever is still missing.
+        # GST Number and Turnover: OpenAI's Responses API (hosted web search)
+        # researches and extracts both fields directly per company, using
+        # the prompt templates in app/prompts/gst_search.md and
+        # turnover_search.md - followed by the jamku turnover-slab fallback.
+        # No Tavily, no SearXNG/Crawl4AI is used here. A value already on
+        # the record (from a prior run/import) is used as-is; the lookup
+        # only runs for whatever is still missing.
         gst = find_valid_gstin(company.gst) if company.gst else None
         turnover = company.turnover
         gst_blocked = False
@@ -349,14 +353,14 @@ class EnrichmentAgent(BaseClass):
             with _timed(company.company_name, "gst_turnover.resolve"):
                 gst_turnover_result = self._gst_turnover.resolve(
                     official_name or company.company_name,
-                    # Kept for the existing resolver signature only.  The
-                    # Firecrawl Search GST/turnover path deliberately never
-                    # uses this website value as an input.
                     official_url or company.website,
                     gst=gst,
                     city=company.city,
                     state=company.state,
                     industry=company.industry,
+                    official_name=official_name,
+                    address=address,
+                    cin=cin or company.cin,
                 )
             gst = gst or (gst_turnover_result.gst.value or None)
             turnover = turnover or (gst_turnover_result.turnover.value or None)
@@ -505,6 +509,7 @@ class EnrichmentAgent(BaseClass):
             field_evidence.update({
                 "turnover_financial_year": gst_turnover_result.turnover.financial_year or "",
                 "turnover_metric": gst_turnover_result.turnover.metric or "",
+                "turnover_currency": gst_turnover_result.turnover.currency or "",
                 "gst_source_type": gst_turnover_result.gst.source_type or "",
                 "turnover_source_type": gst_turnover_result.turnover.source_type or "",
             })
@@ -517,6 +522,7 @@ class EnrichmentAgent(BaseClass):
             field_status["turnover"] = "verified"
             field_evidence["turnover_financial_year"] = ""
             field_evidence["turnover_metric"] = "Aggregate Turnover Slab"
+            field_evidence["turnover_currency"] = ""
             field_evidence["turnover_source_type"] = "jamku"
         field_status["contact"] = "verified" if contact_result and contact_result.confidence >= 90 else ("probable" if contact_result else "needs_verification")
 
@@ -574,6 +580,9 @@ class EnrichmentAgent(BaseClass):
                 ),
                 "turnover_metric": "Aggregate Turnover Slab" if jamku_turnover else (
                     gst_turnover_result.turnover.metric if gst_turnover_result else company.turnover_metric
+                ),
+                "turnover_currency": None if jamku_turnover else (
+                    gst_turnover_result.turnover.currency if gst_turnover_result else company.turnover_currency
                 ),
             }
         )

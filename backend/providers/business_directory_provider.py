@@ -5,10 +5,12 @@ from urllib.parse import quote_plus
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
+from config.geography import classify_location
 from providers.base_provider import BaseProvider
 from schemas.company import Company
 from schemas.search_request import SearchRequest
 from services.browser_service import BrowserService
+from services.geocoding_service import GeoapifyGeocodingService
 
 logger = logging.getLogger(__name__)
 MAX_TRADEINDIA_PAGES = 20
@@ -52,8 +54,13 @@ class BusinessDirectoryProvider(BaseProvider):
     INDIAMART_URL = "https://dir.indiamart.com/search.mp"
     TRADEINDIA_URL = "https://www.tradeindia.com/search.html"
 
-    def __init__(self, browser: Optional[BrowserService] = None):
+    def __init__(self, browser: Optional[BrowserService] = None, geocoder: Optional[GeoapifyGeocodingService] = None):
         self._browser = browser or BrowserService()
+        # Reused across every search() call on this instance, same as
+        # GoogleMapsProvider - geocoding the same location string across
+        # several industry sub-queries for one search only ever costs one
+        # real network call, since GeoapifyGeocodingService caches by string.
+        self._geocoder = geocoder or GeoapifyGeocodingService()
 
     def search(self, request: SearchRequest) -> List[Company]:
 
@@ -65,9 +72,12 @@ class BusinessDirectoryProvider(BaseProvider):
             self._browser.start()
 
         try:
+            requested_geocoded = (
+                self._geocoder.geocode(request.location) if request.location else None
+            )
             companies: List[Company] = []
             companies.extend(self._search_indiamart(request))
-            companies.extend(self._search_tradeindia(request))
+            companies.extend(self._search_tradeindia(request, requested_geocoded))
             return companies
 
         finally:
@@ -166,7 +176,7 @@ class BusinessDirectoryProvider(BaseProvider):
     # TradeIndia
     # ------------------------------------------------------------------
 
-    def _search_tradeindia(self, request: SearchRequest) -> List[Company]:
+    def _search_tradeindia(self, request: SearchRequest, requested_geocoded=None) -> List[Company]:
 
         print("\n-- TradeIndia --")
 
@@ -181,7 +191,10 @@ class BusinessDirectoryProvider(BaseProvider):
                 self._browser.goto(page, url, wait_until="domcontentloaded")
                 page.wait_for_timeout(4000)
 
-                companies = self._load_tradeindia_companies(page, max_results=request.max_results)
+                companies = self._load_tradeindia_companies(
+                    page, max_results=request.max_results,
+                    requested_location=request.location, requested_geocoded=requested_geocoded,
+                )
 
                 print(f"TradeIndia Results : {len(companies)}")
 
@@ -206,14 +219,19 @@ class BusinessDirectoryProvider(BaseProvider):
 
         return f"{self.TRADEINDIA_URL}?keyword={quote_plus(query)}"
 
-    def _load_tradeindia_companies(self, page: Page, max_results: int) -> List[Company]:
+    def _load_tradeindia_companies(
+        self, page: Page, max_results: int, requested_location=None, requested_geocoded=None,
+    ) -> List[Company]:
         """Collects lazy-loaded results and advances pagination until the cap."""
         companies: List[Company] = []
         visited_urls: set[str] = set()
         for _ in range(MAX_TRADEINDIA_PAGES):
             self._scroll_tradeindia_results(page, max_results)
             remaining = max_results - len(companies)
-            companies.extend(self._extract_tradeindia_companies(page, max_results=remaining))
+            companies.extend(self._extract_tradeindia_companies(
+                page, max_results=remaining,
+                requested_location=requested_location, requested_geocoded=requested_geocoded,
+            ))
             companies = self._deduplicate_tradeindia(companies)
             if len(companies) >= max_results or page.url in visited_urls:
                 break
@@ -257,7 +275,9 @@ class BusinessDirectoryProvider(BaseProvider):
                 continue
         return False
 
-    def _extract_tradeindia_companies(self, page: Page, max_results: int) -> List[Company]:
+    def _extract_tradeindia_companies(
+        self, page: Page, max_results: int, requested_location=None, requested_geocoded=None,
+    ) -> List[Company]:
 
         seller_names = page.locator("h3.coy-name")
         count = min(seller_names.count(), max_results)
@@ -272,7 +292,12 @@ class BusinessDirectoryProvider(BaseProvider):
                     "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' card ')][1]"
                 ).first
 
-                companies.append(self._parse_tradeindia_card(card, seller_name_el))
+                company = self._parse_tradeindia_card(card, seller_name_el)
+
+                if not self._is_within_requested_location(company, requested_location, requested_geocoded, self._geocoder):
+                    continue
+
+                companies.append(company)
 
             except Exception as ex:
                 logger.warning(
@@ -281,6 +306,57 @@ class BusinessDirectoryProvider(BaseProvider):
                 continue
 
         return companies
+
+    @staticmethod
+    def _is_within_requested_location(company: Company, requested_location, requested_geocoded=None, geocoder=None) -> bool:
+        """Drops a result only on confirmed conflicting evidence - same rule
+        GoogleMapsProvider already applies (see google_maps_provider.py's
+        _is_within_requested_location). TradeIndia's list view exposes only a
+        bare city label (no address) - classify_location's district-level
+        branch (the one a seeded requested city like "Chennai" actually hits)
+        can only compare that against a *real* company_city/company_state it
+        recognises, never an arbitrary bare city string on its own, so an
+        unseeded city (e.g. "Delhi") would otherwise always come back
+        "unknown" and be kept.
+
+        When a geocoder is available, this resolves the company's own city
+        text first (prefer_city=True - required so a bare place name isn't
+        mismatched against a same-named business; see
+        GeoapifyGeocodingService.geocode) - never a hardcoded lookup - and
+        passes its *city* and *state* (never its ``district``: verified
+        against the real API that Geoapify's district granularity doesn't
+        match this codebase's own city/locality model - e.g. it resolves
+        "Ambattur" to district "Ambattur", not "Chennai", which would
+        wrongly reject a genuine Chennai locality already seeded in
+        CITY_LOCALITIES). The original raw text is still passed as
+        ``company_address`` so classify_location's own free-text state-name
+        matching (e.g. "Delhi" is itself a STATE_NAMES entry) still applies
+        even when geocoding returns no state for a given place. A missing/
+        unresolvable city still stays "unknown", kept, and left for
+        ValidationAgent to flag as unverified - never dropped merely for
+        lacking evidence."""
+        if not requested_location:
+            return True
+        resolved_city = company.city
+        resolved_state = None
+        if company.city and geocoder is not None:
+            company_geocoded = geocoder.geocode(company.city, prefer_city=True)
+            if company_geocoded:
+                resolved_city = company_geocoded.city or company.city
+                resolved_state = company_geocoded.state
+        decision, reason = classify_location(
+            resolved_city, resolved_state, company.city, requested_location,
+            requested_geocoded_state=requested_geocoded.state if requested_geocoded else None,
+            requested_geocoded_district=requested_geocoded.district if requested_geocoded else None,
+            requested_geocoded_city=requested_geocoded.city if requested_geocoded else None,
+        )
+        if decision == "outside":
+            logger.info(
+                "Dropping TradeIndia result '%s' outside requested '%s': %s",
+                company.company_name, requested_location, reason,
+            )
+            return False
+        return True
 
     def _parse_tradeindia_card(self, card: Locator, seller_name_el: Locator) -> Company:
 

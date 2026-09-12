@@ -59,3 +59,4 @@ class Company(BaseModel):
     field_status: dict[str, str] = Field(default_factory=dict)
     turnover_financial_year: Optional[str] = None
     turnover_metric: Optional[str] = None
+    turnover_currency: Optional[str] = None

@@ -33,10 +33,21 @@ class GeoapifyGeocodingService:
         self._cache: dict[str, Optional[GeocodedAddress]] = {}
         self._last_request_at = 0.0
 
-    def geocode(self, address: Optional[str]) -> Optional[GeocodedAddress]:
+    def geocode(self, address: Optional[str], prefer_city: bool = False) -> Optional[GeocodedAddress]:
+        """``prefer_city=True`` restricts Geoapify to administrative-place
+        matches only (``type=city``) - required for a bare place name (e.g.
+        "Delhi"), which otherwise free-text-matches any similarly-named
+        business/POI (verified against the real API: "Delhi" alone resolves
+        to a Coimbatore restaurant called "Delhi Sweet" without this,
+        silently returning the wrong city/state/district entirely). Leave
+        False (default) for a real street address, where the extra context
+        already disambiguates correctly and this would only lose the
+        building-level precision callers like EnrichmentAgent's
+        locality/suburb resolution rely on.
+        """
         if not self._api_key or not address:
             return None
-        cache_key = " ".join(address.lower().split())
+        cache_key = ("city:" if prefer_city else "addr:") + " ".join(address.lower().split())
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -45,13 +56,16 @@ class GeoapifyGeocodingService:
         if wait > 0:
             time.sleep(wait)
         try:
-            query = urlencode({
+            params = {
                 "text": address,
                 "filter": "countrycode:in",
                 "format": "json",
                 "limit": 1,
                 "apiKey": self._api_key,
-            })
+            }
+            if prefer_city:
+                params["type"] = "city"
+            query = urlencode(params)
             request = Request(f"{GEOAPIFY_URL}?{query}", headers={"User-Agent": "MarketingAgent/1.0"})
             with urlopen(request, timeout=15) as response:
                 payload = json.loads(response.read().decode("utf-8"))

@@ -1,9 +1,9 @@
 """
-Crawl4AI client used only as a fallback to Firecrawl for GST/turnover
-enrichment (see service.py). Firecrawl is always tried first; this is
-invoked only when Firecrawl fails, errors, times out, or its content
-yields no valid value for the existing extraction logic in
-gst_extraction.py / turnover_extraction.py.
+Crawl4AI client used to crawl full page content for GST/turnover
+enrichment (see service.py) - both the company's known-website tier and
+every URL discovered via SearXNG search. Invoked when the primary
+SearXNG-snippet evidence yields no valid value for the existing
+extraction logic in gst_extraction.py / turnover_extraction.py.
 
 Never raises - any failure (package missing, navigation error, timeout)
 degrades to a controlled failure result so a single company's GST/turnover

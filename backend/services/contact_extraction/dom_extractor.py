@@ -7,7 +7,11 @@ so `dedupe.py`/`scorer.py` always get to weigh every option found on a page.
 
 import re
 
-from services.contact_extraction.designation_rules import canonical_designation, is_exact_match
+from services.contact_extraction.designation_rules import (
+    canonical_designation,
+    is_exact_match,
+    strip_known_designation_prefix,
+)
 from services.contact_extraction.models import ContactCandidate, PageCategory
 from services.contact_extraction.name_rules import is_person_name, normalize_name
 
@@ -117,10 +121,19 @@ def _name_and_title_from_container(container, text: str) -> "tuple[str | None, s
     except Exception:
         heading_text = ""
 
-    if heading_text and is_person_name(heading_text):
-        remainder = [line for line in lines if line != heading_text]
-        if remainder:
-            return heading_text, remainder[0]
+    if heading_text:
+        if is_person_name(heading_text):
+            remainder = [line for line in lines if line != heading_text]
+            if remainder:
+                return heading_text, remainder[0]
+        else:
+            # A title concatenated directly against a name with no
+            # separator ("Managing Director John Smith") fails the check
+            # above outright - recover the (name, title) split here instead
+            # of losing the candidate entirely.
+            stripped_name, prefix_designation = strip_known_designation_prefix(heading_text)
+            if prefix_designation and is_person_name(stripped_name):
+                return stripped_name, prefix_designation
 
     for name, title in _line_pairs(lines):
         return name, title
@@ -255,6 +268,14 @@ def _extract_from_text_blocks(page, source_url, page_category) -> "list[ContactC
         for neighbor in neighbors:
             if is_person_name(neighbor):
                 _append_text_candidate(candidates, seen, neighbor, line, source_url, page_category)
+                continue
+            # Same title-concatenated-with-no-separator recovery as the
+            # container path above - `line` (already an exact designation
+            # match) stays the title; only the neighbour's own leading
+            # title-prefix (if any) is stripped to recover a usable name.
+            stripped_name, prefix_designation = strip_known_designation_prefix(neighbor)
+            if prefix_designation and is_person_name(stripped_name):
+                _append_text_candidate(candidates, seen, stripped_name, line, source_url, page_category)
 
     return candidates
 
