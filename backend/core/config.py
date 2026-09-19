@@ -179,5 +179,13 @@ class Settings:
     EXCEL_TEMPLATE_PATH: str = "templates/LeadImport_template.xlsx"
     EXCEL_TEMPLATE_HEADER_ROW: int | None = None
 
+    # Mautic campaign that newly scraped/validated leads are added to when a
+    # completed job is pushed to Mautic (see services/mautic/outreach_service.py).
+    # Default 135 = "15 ERP Signs", the only currently-published campaign in
+    # this Mautic instance - Mautic only sends emails for published campaigns.
+    MAUTIC_OUTREACH_CAMPAIGN_ID = int(
+        os.getenv("MAUTIC_OUTREACH_CAMPAIGN_ID", "135")
+    )
+
 
 settings = Settings()

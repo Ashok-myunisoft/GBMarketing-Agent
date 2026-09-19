@@ -73,3 +73,73 @@ export type Job = {
   lead_count: number;
   result: WorkflowResult | null;
 };
+
+export type MauticContact = {
+  id: number;
+  firstname: string | null;
+  lastname: string | null;
+  email: string | null;
+  phone: string | null;
+  company: string | null;
+  city: string | null;
+  country: string | null;
+  address1: string | null;
+  address2: string | null;
+  state: string | null;
+  zipcode: string | null;
+  position: string | null;
+  website: string | null;
+  date_added: string | null;
+  date_modified: string | null;
+};
+
+export type MauticSummary = {
+  total_contacts: number | null;
+  contacts_on_page: number;
+};
+
+export type MauticPagination = {
+  page: number;
+  limit: number;
+  count: number;
+  total_pages: number | null;
+  has_previous: boolean;
+  has_next: boolean;
+};
+
+export type MauticDashboardResponse = {
+  connected: boolean;
+  summary: MauticSummary;
+  contacts: MauticContact[];
+  pagination: MauticPagination;
+};
+
+export type MauticActivityEvent = {
+  type: string | null;
+  category: "opened" | "clicked" | "sent" | "other";
+  label: string | null;
+  detail: string | null;
+  url: string | null;
+  timestamp: string | null;
+};
+
+export type MauticActivityResponse = {
+  contact_id: number;
+  total: number | null;
+  events: MauticActivityEvent[];
+};
+
+export type MauticSyncError = {
+  company: string | null;
+  email: string;
+  error: string;
+};
+
+export type MauticSyncResult = {
+  job_id: string;
+  campaign_id: number;
+  sent: number;
+  skipped: number;
+  failed: number;
+  errors: MauticSyncError[];
+};

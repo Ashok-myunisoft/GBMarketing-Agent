@@ -12,66 +12,10 @@ MANDATORY:
 Your objective is to identify the GSTIN belonging to the EXACT company provided below and return a reliable, source-backed result.
 
 ==================================================
-COMPANY INFORMATION
-==================================================
-
-Company name:
-{{company_name}}
-
-Official / legal name:
-{{official_name}}
-
-Website:
-{{website}}
-
-City:
-{{city}}
-
-State:
-{{state}}
-
-Industry:
-{{industry}}
-
-Address:
-{{address}}
-
-CIN:
-{{cin}}
-
-IMPORTANT:
-- A blank field means that information is unavailable.
-- Ignore blank fields.
-- Never treat a blank or missing field as information about the company.
-- Do not assume that two companies are the same merely because their names are similar.
-
-==================================================
-PRIMARY SEARCH QUERY
-==================================================
-
-"{{company_name}}" GST number
-
-Use this query pattern as the PRIMARY search query.
-
-If the primary query does not provide sufficient evidence, perform additional searches using closely related query patterns.
-
-Possible secondary queries:
-
-"{{company_name}}" GSTIN
-"{{company_name}}" "GST registration number"
-"{{company_name}}" "GST number" "{{city}}"
-"{{company_name}}" GSTIN "{{state}}"
-"{{official_name}}" GSTIN
-"{{official_name}}" GST "{{state}}"
-"{{company_name}}" "{{cin}}" GST
-
-Do not perform unnecessary searches once a result has been sufficiently verified.
-
-==================================================
 RESEARCH OBJECTIVE
 ==================================================
 
-Find the GSTIN of the exact company specified above.
+Find the GSTIN of the exact company specified below.
 
 The GSTIN must be associated with the requested company, not merely with a similarly named company.
 
@@ -276,6 +220,62 @@ NEVER:
 - treat search-result snippets as sufficient evidence when the underlying source contradicts them
 - fabricate source URLs
 - fabricate evidence
+
+==================================================
+COMPANY INFORMATION
+==================================================
+
+Company name:
+{{company_name}}
+
+Official / legal name:
+{{official_name}}
+
+Website:
+{{website}}
+
+City:
+{{city}}
+
+State:
+{{state}}
+
+Industry:
+{{industry}}
+
+Address:
+{{address}}
+
+CIN:
+{{cin}}
+
+IMPORTANT:
+- A blank field means that information is unavailable.
+- Ignore blank fields.
+- Never treat a blank or missing field as information about the company.
+- Do not assume that two companies are the same merely because their names are similar.
+
+==================================================
+PRIMARY SEARCH QUERY
+==================================================
+
+"{{company_name}}" GST number
+
+Use this query pattern as the PRIMARY search query.
+
+If the primary query does not provide sufficient evidence, perform additional searches using closely related query patterns.
+
+Possible secondary queries:
+
+"{{company_name}}" GSTIN
+"{{company_name}}" "GST registration number"
+"{{company_name}}" "GST number" "{{city}}"
+"{{company_name}}" GSTIN "{{state}}"
+"{{official_name}}" GSTIN
+"{{official_name}}" GST "{{state}}"
+"{{company_name}}" "{{cin}}" GST
+
+Do not perform unnecessary searches once a result has been sufficiently verified.
 
 ==================================================
 OUTPUT

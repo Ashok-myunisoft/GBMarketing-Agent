@@ -12,63 +12,6 @@ MANDATORY:
 Your objective is to identify the latest reliable annual turnover/revenue of the EXACT company provided below.
 
 ==================================================
-COMPANY INFORMATION
-==================================================
-
-Company name:
-{{company_name}}
-
-Official / legal name:
-{{official_name}}
-
-Website:
-{{website}}
-
-City:
-{{city}}
-
-State:
-{{state}}
-
-Industry:
-{{industry}}
-
-Address:
-{{address}}
-
-CIN:
-{{cin}}  
-
-IMPORTANT:
-- A blank field means that information is unavailable.
-- Ignore blank fields.
-- Never treat blank fields as facts.
-- Do not assume similarly named companies are the same company.
-
-==================================================
-PRIMARY SEARCH QUERY
-==================================================
-
-"{{company_name}}" turnover
-
-Use this as the PRIMARY search query.
-
-If the primary search does not provide sufficient evidence, use closely related searches such as:
-
-"{{company_name}}" revenue
-"{{company_name}}" annual turnover
-"{{company_name}}" annual revenue
-"{{company_name}}" "revenue from operations"
-"{{company_name}}" financial statements
-"{{company_name}}" annual report
-"{{official_name}}" turnover
-"{{official_name}}" revenue
-"{{company_name}}" "{{cin}}" revenue
-"{{company_name}}" "{{state}}" turnover
-
-Use additional searches when necessary to verify the company or resolve conflicting figures.
-
-==================================================
 RESEARCH OBJECTIVE
 ==================================================
 
@@ -364,6 +307,63 @@ NEVER:
 - fabricate financial years
 - fabricate source URLs
 - fabricate evidence
+
+==================================================
+COMPANY INFORMATION
+==================================================
+
+Company name:
+{{company_name}}
+
+Official / legal name:
+{{official_name}}
+
+Website:
+{{website}}
+
+City:
+{{city}}
+
+State:
+{{state}}
+
+Industry:
+{{industry}}
+
+Address:
+{{address}}
+
+CIN:
+{{cin}}  
+
+IMPORTANT:
+- A blank field means that information is unavailable.
+- Ignore blank fields.
+- Never treat blank fields as facts.
+- Do not assume similarly named companies are the same company.
+
+==================================================
+PRIMARY SEARCH QUERY
+==================================================
+
+"{{company_name}}" turnover
+
+Use this as the PRIMARY search query.
+
+If the primary search does not provide sufficient evidence, use closely related searches such as:
+
+"{{company_name}}" revenue
+"{{company_name}}" annual turnover
+"{{company_name}}" annual revenue
+"{{company_name}}" "revenue from operations"
+"{{company_name}}" financial statements
+"{{company_name}}" annual report
+"{{official_name}}" turnover
+"{{official_name}}" revenue
+"{{company_name}}" "{{cin}}" revenue
+"{{company_name}}" "{{state}}" turnover
+
+Use additional searches when necessary to verify the company or resolve conflicting figures.
 
 ==================================================
 OUTPUT

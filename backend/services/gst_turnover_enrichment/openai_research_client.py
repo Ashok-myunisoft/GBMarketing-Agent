@@ -176,8 +176,8 @@ class OpenAIResearchClient:
             request_input = rendered
             if attempt:
                 request_input += (
-                    "\n\nPerform one independent second web-search pass using the alternative "
-                    "queries in this prompt. Re-check the exact company identity before returning JSON."
+                    "\n\nYour previous response could not be parsed as valid JSON. "
+                    "Return ONLY valid JSON exactly matching the required schema, with no other text."
                 )
             try:
                 response = self._client.responses.create(
@@ -213,8 +213,12 @@ class OpenAIResearchClient:
                 "[AI_RESEARCH] prompt=%s company=%s status=%s attempt=%s",
                 prompt_name, company_name, payload.get("status"), attempt + 1,
             )
-            if payload.get("status") != "not_found" or attempt == 1:
-                return payload
+            # A well-formed, well-shaped payload is trusted as final even
+            # when status is "not_found" - that is a legitimate research
+            # outcome (no public GST/turnover data exists), not a failure
+            # worth paying for a second full web-search request over. Only
+            # a parse failure / malformed shape above triggers a retry.
+            return payload
 
         return None
 
