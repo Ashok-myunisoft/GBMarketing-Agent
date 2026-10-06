@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { createJob, deleteExistingData, exportUrl, getExistingData, getJob, getJobEvents, getJobs, uploadExistingData } from "./api";
+import { createJob, deleteExistingData, exportUrl, getExistingData, getHourlyCompanyStats, getJob, getJobEvents, getJobs, uploadExistingData } from "./api";
 import type { ExistingDataFile } from "./api";
 import { getMauticContactActivity, getMauticDashboard, mauticConnectUrl, syncJobToMautic } from "./services/mauticService";
 import type { Company, Job, JobEvent, MauticActivityEvent, MauticContact, MauticPagination, MauticSummary, MauticSyncResult, PipelineStats } from "./types";
@@ -84,6 +84,8 @@ function Dashboard({ jobs, completed, onSelect }: { jobs: Job[]; completed: numb
   const leadCount = jobs.reduce((total, job) => total + job.lead_count, 0);
   const [mauticTotal, setMauticTotal] = useState<number | null>(null);
   const [mauticFailed, setMauticFailed] = useState(false);
+  const [hourlyCompanyCount, setHourlyCompanyCount] = useState<number | null>(null);
+  const [hourlyCompanyFailed, setHourlyCompanyFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,10 +95,74 @@ function Dashboard({ jobs, completed, onSelect }: { jobs: Job[]; completed: numb
     return () => { cancelled = true; };
   }, []);
 
-  const mauticValue = mauticFailed ? "—" : mauticTotal === null ? "…" : mauticTotal.toLocaleString();
+  useEffect(() => {
+    let cancelled = false;
+    const refreshHourlyCount = () => {
+      getHourlyCompanyStats()
+        .then((response) => {
+          const count = extractCompanyCount(response);
+          if (!cancelled) {
+            setHourlyCompanyCount(count);
+            setHourlyCompanyFailed(count === null);
+          }
+        })
+        .catch(() => { if (!cancelled) setHourlyCompanyFailed(true); });
+    };
 
-  return <><section className="stats"><Stat label="Total jobs" value={jobs.length} /><Stat label="Completed runs" value={completed} /><Stat label="Leads saved" value={leadCount} /><Stat label="Running now" value={jobs.filter((job) => job.status === "running").length} /><Stat label="Mautic Contacts" value={mauticValue} /></section>
+    refreshHourlyCount();
+    const timer = window.setInterval(refreshHourlyCount, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const mauticValue = mauticFailed ? "—" : mauticTotal === null ? "…" : mauticTotal.toLocaleString();
+  const hourlyCompanyValue = hourlyCompanyFailed ? "N/A" : hourlyCompanyCount === null ? "Loading" : hourlyCompanyCount.toLocaleString();
+
+  return <><section className="stats"><Stat label="Total jobs" value={jobs.length} /><Stat label="Completed runs" value={completed} /><Stat label="Leads saved" value={leadCount} /><Stat label="Running now" value={jobs.filter((job) => job.status === "running").length} /><Stat label="Total companies" value={hourlyCompanyValue} /><Stat label="Mautic Contacts" value={mauticValue} /></section>
     <section className="panel"><div className="panel-title"><div><h2>Recent searches</h2><p>Open a job to review its workflow and results.</p></div></div><History jobs={latest} onSelect={onSelect} compact /></section></>;
+}
+
+function extractCompanyCount(payload: unknown): number | null {
+  if (typeof payload === "number" && Number.isFinite(payload)) return payload;
+  if (!payload || typeof payload !== "object") return null;
+  if (Array.isArray(payload)) {
+    const counts = payload.map(extractCountFromRecord);
+    return counts.every((count) => count !== null)
+      ? counts.reduce<number>((sum, count) => sum + (count ?? 0), 0)
+      : null;
+  }
+  const record = payload as Record<string, unknown>;
+  const direct = extractCountFromRecord(record);
+  if (direct !== null) return direct;
+  for (const key of ["data", "results", "items", "hours", "stats"]) {
+    if (key in record) return extractCompanyCount(record[key]);
+  }
+  return null;
+}
+
+function extractCountFromRecord(value: unknown): number | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const total = firstNumericValue(record, [
+    "total_saved_companies", "total_company_count", "total_companies", "companies_count", "company_count", "total_count", "total",
+  ]);
+  if (total !== null) return total;
+
+  const existing = firstNumericValue(record, ["existing_data_count", "existing_company_count", "existing_count"]);
+  const added = firstNumericValue(record, ["new_data_count", "new_company_count", "new_count", "added_count"]);
+  if (existing !== null || added !== null) return (existing ?? 0) + (added ?? 0);
+  return firstNumericValue(record, ["count"]);
+}
+
+function firstNumericValue(record: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const candidate = record[key];
+    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+    if (typeof candidate === "string" && candidate.trim() && Number.isFinite(Number(candidate))) return Number(candidate);
+  }
+  return null;
 }
 
 function LeadSearch({ query, setQuery, onSubmit, job, events }: { query: string; setQuery: (value: string) => void; onSubmit: (event: FormEvent) => void; job: Job | null; events: JobEvent[] }) {

@@ -361,6 +361,7 @@ class EnrichmentAgent(BaseClass):
                     official_name=official_name,
                     address=address,
                     cin=cin or company.cin,
+                    turnover=turnover,
                 )
             gst = gst or (gst_turnover_result.gst.value or None)
             turnover = turnover or (gst_turnover_result.turnover.value or None)
@@ -503,16 +504,20 @@ class EnrichmentAgent(BaseClass):
             field_confidence = dict(field_confidence)
             field_sources = dict(field_sources)
             field_evidence = dict(field_evidence)
-            field_confidence.update({"gst": gst_turnover_result.gst.confidence, "turnover": gst_turnover_result.turnover.confidence})
-            field_sources.update({"gst": gst_turnover_result.gst.source_url or "", "turnover": gst_turnover_result.turnover.source_url or ""})
-            field_status.update({"gst": gst_turnover_result.gst.status, "turnover": gst_turnover_result.turnover.status})
-            field_evidence.update({
-                "turnover_financial_year": gst_turnover_result.turnover.financial_year or "",
-                "turnover_metric": gst_turnover_result.turnover.metric or "",
-                "turnover_currency": gst_turnover_result.turnover.currency or "",
-                "gst_source_type": gst_turnover_result.gst.source_type or "",
-                "turnover_source_type": gst_turnover_result.turnover.source_type or "",
-            })
+            field_confidence["gst"] = gst_turnover_result.gst.confidence
+            field_sources["gst"] = gst_turnover_result.gst.source_url or ""
+            field_status["gst"] = gst_turnover_result.gst.status
+            field_evidence["gst_source_type"] = gst_turnover_result.gst.source_type or ""
+            if gst_turnover_result.turnover.status != "existing":
+                field_confidence["turnover"] = gst_turnover_result.turnover.confidence
+                field_sources["turnover"] = gst_turnover_result.turnover.source_url or ""
+                field_status["turnover"] = gst_turnover_result.turnover.status
+                field_evidence.update({
+                    "turnover_financial_year": gst_turnover_result.turnover.financial_year or "",
+                    "turnover_metric": gst_turnover_result.turnover.metric or "",
+                    "turnover_currency": gst_turnover_result.turnover.currency or "",
+                    "turnover_source_type": gst_turnover_result.turnover.source_type or "",
+                })
         if jamku_turnover:
             field_confidence = dict(field_confidence)
             field_sources = dict(field_sources)
@@ -576,13 +581,16 @@ class EnrichmentAgent(BaseClass):
                 "field_sources": field_sources,
                 "field_status": field_status,
                 "turnover_financial_year": None if jamku_turnover else (
-                    gst_turnover_result.turnover.financial_year if gst_turnover_result else company.turnover_financial_year
+                    (gst_turnover_result.turnover.financial_year or company.turnover_financial_year)
+                    if gst_turnover_result else company.turnover_financial_year
                 ),
                 "turnover_metric": "Aggregate Turnover Slab" if jamku_turnover else (
-                    gst_turnover_result.turnover.metric if gst_turnover_result else company.turnover_metric
+                    (gst_turnover_result.turnover.metric or company.turnover_metric)
+                    if gst_turnover_result else company.turnover_metric
                 ),
                 "turnover_currency": None if jamku_turnover else (
-                    gst_turnover_result.turnover.currency if gst_turnover_result else company.turnover_currency
+                    (gst_turnover_result.turnover.currency or company.turnover_currency)
+                    if gst_turnover_result else company.turnover_currency
                 ),
             }
         )

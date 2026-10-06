@@ -3,13 +3,13 @@ from typing import List
 from agents.base_agent import BaseClass
 from schemas.search_request import SearchRequest
 from schemas.company import Company
-from services.search_services import SearchService
+from services.discovered_companies_repository import DiscoveredCompaniesSearchService
 
 
 class SearchAgent(BaseClass):
 
     def __init__(self):
-        self.search_service = SearchService()
+        self.search_service = DiscoveredCompaniesSearchService()
 
     def execute(self, request: SearchRequest) -> List[Company]:
 

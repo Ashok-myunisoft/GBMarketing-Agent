@@ -169,6 +169,9 @@ class Settings:
 
 
     DATABASE_URL = os.getenv("DATABASE_URL")
+    # Separate, read-only source for lead discovery. Do not reuse DATABASE_URL:
+    # it belongs to the existing TLead/Mautic persistence paths.
+    DISCOVERED_COMPANIES_DATABASE_URL = os.getenv("DISCOVERED_COMPANIES_DATABASE_URL")
 
     POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))

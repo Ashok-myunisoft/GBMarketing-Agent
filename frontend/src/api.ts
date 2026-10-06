@@ -2,7 +2,8 @@ import type { Job, JobEvent } from "./types";
 
 export type ExistingDataFile = { name: string; size: number; updated_at: number };
 
-export const API_BASE = "http://217.217.249.121:8040";
+export const API_BASE = import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.DEV ? "/api" : "http://217.217.249.121:8040");
 
 export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -43,6 +44,10 @@ export function getJob(id: string) {
 
 export function getJobs() {
   return request<Job[]>("/jobs");
+}
+
+export function getHourlyCompanyStats() {
+  return request<unknown>("/stats/companies/hourly");
 }
 
 export function getJobEvents(id: string) {

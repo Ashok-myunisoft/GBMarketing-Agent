@@ -1,6 +1,7 @@
 import tempfile
 from pathlib import Path
 from typing import Optional
+import httpx
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, RedirectResponse
@@ -22,9 +23,25 @@ from services.mautic.outreach_service import MauticOutreachService, MauticOutrea
 
 router = APIRouter()
 
+COMPANY_HOURLY_STATS_URL = "http://217.217.249.121:8041/stats/companies/hourly"
+
 job_service = JobService()
 existing_data_service = ExistingDataService()
 mlead_repository = MleadRepository()
+
+
+@router.get("/stats/companies/hourly")
+async def get_hourly_company_stats():
+    """Proxy hourly company statistics for the dashboard."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(COMPANY_HOURLY_STATS_URL)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Hourly company stats service returned HTTP {exc.response.status_code}.") from exc
+    except (httpx.RequestError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Unable to load hourly company stats.") from exc
 
 # Mautic OAuth service
 mautic_oauth_service = MauticOAuthService()

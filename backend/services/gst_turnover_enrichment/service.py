@@ -42,6 +42,7 @@ class GstTurnoverEnrichmentService:
         self, company_name: str, website: Optional[str] = None, gst: Optional[str] = None,
         city: Optional[str] = None, state: Optional[str] = None, industry: Optional[str] = None,
         official_name: Optional[str] = None, address: Optional[str] = None, cin: Optional[str] = None,
+        turnover: Optional[str] = None,
     ) -> GstTurnoverResult:
         """Resolve fields independently via OpenAI web-search research.
 
@@ -58,10 +59,16 @@ class GstTurnoverEnrichmentService:
             gst_future = None if gst else executor.submit(self._resolve_gst, company_name, state, company_fields)
             turnover_future = executor.submit(
                 self._resolve_turnover, company_name, state, company_fields
-            ) if settings.ENRICHMENT_LOOKUP_TURNOVER else None
+            ) if settings.ENRICHMENT_LOOKUP_TURNOVER and not turnover else None
 
-            gst_result = gst_future.result() if gst_future else FieldResult(status="not_found")
-            turnover_result = turnover_future.result() if turnover_future else FieldResult(status="not_found")
+            gst_result = (
+                gst_future.result() if gst_future
+                else FieldResult(value=gst or "", status="existing" if gst else "not_found")
+            )
+            turnover_result = (
+                turnover_future.result() if turnover_future
+                else FieldResult(value=turnover or "", status="existing" if turnover else "not_found")
+            )
 
         return GstTurnoverResult(gst=gst_result, turnover=turnover_result)
 
