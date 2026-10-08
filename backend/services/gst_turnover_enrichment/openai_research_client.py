@@ -187,6 +187,16 @@ class OpenAIResearchClient:
                     text={"format": {"type": "json_schema", "name": schema_name, "schema": schema, "strict": True}},
                 )
                 text = response.output_text
+                usage = getattr(response, "usage", None)
+                if usage:
+                    logger.info(
+                        "[AI_USAGE] provider=openai operation=%s model=%s input_tokens=%s output_tokens=%s total_tokens=%s",
+                        prompt_name,
+                        self._model,
+                        getattr(usage, "input_tokens", "unknown"),
+                        getattr(usage, "output_tokens", "unknown"),
+                        getattr(usage, "total_tokens", "unknown"),
+                    )
             except Exception:
                 logger.exception(
                     "[AI_RESEARCH] prompt=%s company=%s request failed", prompt_name, company_name

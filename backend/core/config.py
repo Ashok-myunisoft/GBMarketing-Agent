@@ -166,6 +166,9 @@ class Settings:
     OPENAI_RESEARCH_API_KEY = os.getenv("OPENAI_RESEARCH_API_KEY", "")
     OPENAI_RESEARCH_MODEL = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-4.1-mini")
     OPENAI_RESEARCH_TIMEOUT_SECONDS = max(1, int(os.getenv("OPENAI_RESEARCH_TIMEOUT_SECONDS", "60")))
+    GST_TURNOVER_CACHE_TTL_SECONDS = max(
+        60, int(os.getenv("GST_TURNOVER_CACHE_TTL_SECONDS", str(7 * 24 * 60 * 60)))
+    )
 
 
     DATABASE_URL = os.getenv("DATABASE_URL")

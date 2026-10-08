@@ -9,8 +9,11 @@ hardcoded here.
 """
 
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+from urllib.parse import urlsplit
 
 from config.geography import gst_state_conflict
 from core.config import settings
@@ -22,6 +25,51 @@ from services.gst_turnover_enrichment.openai_research_client import AIResearchRe
 
 logger = logging.getLogger(__name__)
 _LOG_TAG = {"GST Number": "GST", "Turnover": "TURNOVER"}
+
+# Successful field results are reused across jobs in this API process. Keep
+# this cache bounded by age and avoid caching not-found results, which may be
+# temporary (for example, a source may be unavailable during one run).
+_CACHE_TTL_SECONDS = max(60, int(settings.GST_TURNOVER_CACHE_TTL_SECONDS))
+_RESULT_CACHE: dict[tuple, tuple[float, FieldResult]] = {}
+_RESULT_CACHE_LOCK = threading.Lock()
+
+
+def _cache_identity(company_name: str, website: Optional[str], cin: Optional[str], state: Optional[str]) -> tuple:
+    normalize = lambda value: " ".join((value or "").strip().lower().split())
+    host = urlsplit(website if website and "://" in website else f"//{website or ''}").netloc.lower().removeprefix("www.")
+    return (normalize(company_name), host, normalize(cin), normalize(state))
+
+
+def _copy_result(result: FieldResult) -> FieldResult:
+    values = vars(result).copy()
+    values["sources"] = list(result.sources)
+    return FieldResult(**values)
+
+
+def _cached_field(identity: tuple, field_name: str) -> Optional[FieldResult]:
+    now = time.monotonic()
+    key = identity + (field_name,)
+    with _RESULT_CACHE_LOCK:
+        entry = _RESULT_CACHE.get(key)
+        if entry is None:
+            return None
+        expires_at, result = entry
+        if expires_at <= now:
+            _RESULT_CACHE.pop(key, None)
+            return None
+        return _copy_result(result)
+
+
+def _store_field(identity: tuple, field_name: str, result: FieldResult) -> None:
+    if not result.value or result.status not in {"verified", "unverified"}:
+        return
+    now = time.monotonic()
+    with _RESULT_CACHE_LOCK:
+        # Opportunistically discard expired records so the process cache stays bounded.
+        for key, (expires_at, _) in list(_RESULT_CACHE.items()):
+            if expires_at <= now:
+                _RESULT_CACHE.pop(key, None)
+        _RESULT_CACHE[identity + (field_name,)] = (now + _CACHE_TTL_SECONDS, _copy_result(result))
 
 
 class GstTurnoverEnrichmentService:
@@ -55,20 +103,32 @@ class GstTurnoverEnrichmentService:
             company_name=company_name, official_name=official_name, website=website,
             city=city, state=state, industry=industry, address=address, cin=cin,
         )
+        identity = _cache_identity(company_name, website, cin, state)
+        cached_gst = _cached_field(identity, "gst") if not gst else None
+        cached_turnover = _cached_field(identity, "turnover") if not turnover else None
+        if cached_gst:
+            logger.info("[GST] result_cache=hit company=%s", company_name)
+        if cached_turnover:
+            logger.info("[TURNOVER] result_cache=hit company=%s", company_name)
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gst-turnover-field") as executor:
-            gst_future = None if gst else executor.submit(self._resolve_gst, company_name, state, company_fields)
+            gst_future = None if gst or cached_gst else executor.submit(self._resolve_gst, company_name, state, company_fields)
             turnover_future = executor.submit(
                 self._resolve_turnover, company_name, state, company_fields
-            ) if settings.ENRICHMENT_LOOKUP_TURNOVER and not turnover else None
+            ) if settings.ENRICHMENT_LOOKUP_TURNOVER and not turnover and not cached_turnover else None
 
             gst_result = (
                 gst_future.result() if gst_future
+                else cached_gst if cached_gst
                 else FieldResult(value=gst or "", status="existing" if gst else "not_found")
             )
             turnover_result = (
                 turnover_future.result() if turnover_future
+                else cached_turnover if cached_turnover
                 else FieldResult(value=turnover or "", status="existing" if turnover else "not_found")
             )
+
+        _store_field(identity, "gst", gst_result)
+        _store_field(identity, "turnover", turnover_result)
 
         return GstTurnoverResult(gst=gst_result, turnover=turnover_result)
 

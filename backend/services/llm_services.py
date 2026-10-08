@@ -40,6 +40,28 @@ class LLMService:
         )
 
     @staticmethod
+    def _log_usage(payload: Any) -> None:
+        """Log usage when the RunPod worker includes OpenAI-style usage data."""
+        usage = None
+        pending = [payload]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                if isinstance(item.get("usage"), dict):
+                    usage = item["usage"]
+                    break
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        if usage is not None:
+            logger.info(
+                "[AI_USAGE] provider=runpod operation=llm input_tokens=%s output_tokens=%s total_tokens=%s",
+                usage.get("input_tokens", usage.get("prompt_tokens", "unknown")),
+                usage.get("output_tokens", usage.get("completion_tokens", "unknown")),
+                usage.get("total_tokens", "unknown"),
+            )
+
+    @staticmethod
     def _provider_message(payload: Any) -> Optional[str]:
         if not isinstance(payload, dict):
             return None
@@ -160,6 +182,7 @@ class LLMService:
                 else:
                     response.raise_for_status()
                     payload = response.json()
+                self._log_usage(payload)
 
                 state = self._state(payload)
                 if state in self._FAILED_STATES:
@@ -208,6 +231,7 @@ class LLMService:
             response = client.post(self._build_payload(system_prompt, user_prompt, temperature, max_tokens), headers, timeout)
             response.raise_for_status()
             payload = response.json()
+            self._log_usage(payload)
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
             raise LLMTemporarilyUnavailableError("RunPod could not accept the LLM request.") from exc
 
