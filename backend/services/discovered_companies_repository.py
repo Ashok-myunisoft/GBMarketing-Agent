@@ -42,7 +42,7 @@ class DiscoveredCompaniesRepository:
     _LOCATION_FILTER_COLUMNS = (
         "city", "city_name", "company_city", "town", "locality", "district", "district_name",
         "state", "state_name", "region", "location", "location_name", "company_location",
-        "locations", "address", "full_address", "registered_address", "company_address", "addresses",
+        "locations",
     )
 
     def __init__(self, dsn: Optional[str] = None):
@@ -101,7 +101,7 @@ class DiscoveredCompaniesRepository:
                     )
                     if not location_columns:
                         raise RuntimeError(
-                            "public.discovered_companies has no recognized location/address column."
+                            "public.discovered_companies has no recognized location column."
                         )
                     terms = [term for term in location_query_variants(location) if term]
                     condition, values = self._text_match(location_columns, terms)
