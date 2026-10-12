@@ -13,8 +13,8 @@ class SourceCandidate:
     currency: Optional[str] = None
     financial_year: Optional[str] = None
     metric: Optional[str] = None
-    # "ai_web_search" is the OpenAI Responses API's own web-search research
-    # (see openai_research_client.py) - the sole GST/turnover mechanism now.
+    # "ai_web_search" is Gemini's Google Search grounded research
+    # (see gemini_research_client.py) - the GST/turnover research mechanism.
     source_type: str = "scraped_page"
     # Short surrounding text (~1-2 lines) the value was actually found in -
     # lets ai_validator.py judge whose identity a GSTIN/turnover figure

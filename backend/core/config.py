@@ -158,11 +158,11 @@ class Settings:
     CRAWL4AI_ENABLED = os.getenv("CRAWL4AI_ENABLED", "true").lower() == "true"
     CRAWL4AI_TIMEOUT_SECONDS = max(1, int(os.getenv("CRAWL4AI_TIMEOUT_SECONDS", "30")))
 
-    # Real OpenAI Responses API - GST/turnover's search+extraction mechanism
-    # (services/gst_turnover_enrichment/openai_research_client.py), replacing
-    # SearXNG+Crawl4AI in that one path. Deliberately separate from
-    # OPENAI_API_KEY/OPENAI_MODEL above, which are actually RunPod credentials
-    # (see LLMService) used by unrelated AI features - never repurpose those.
+    # Gemini API + Google Search grounding for GST/turnover research.
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_RESEARCH_MODEL = os.getenv("GEMINI_RESEARCH_MODEL", "gemini-3.8-flash")
+    GEMINI_RESEARCH_TIMEOUT_SECONDS = max(1, int(os.getenv("GEMINI_RESEARCH_TIMEOUT_SECONDS", "60")))
+    # Retained for the unused legacy client; GST/turnover now uses Gemini.
     OPENAI_RESEARCH_API_KEY = os.getenv("OPENAI_RESEARCH_API_KEY", "")
     OPENAI_RESEARCH_MODEL = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-4.1-mini")
     OPENAI_RESEARCH_TIMEOUT_SECONDS = max(1, int(os.getenv("OPENAI_RESEARCH_TIMEOUT_SECONDS", "60")))

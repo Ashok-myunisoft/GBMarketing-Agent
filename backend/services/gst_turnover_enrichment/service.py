@@ -1,7 +1,7 @@
 """Company-name AI web-search research for GST and turnover only.
 
-OpenAI's Responses API (hosted web_search tool) is both the search AND
-extraction mechanism - see openai_research_client.py. Neither SearXNG nor
+Gemini's Google Search grounding and generation are the search AND
+extraction mechanism - see gemini_research_client.py. Neither SearXNG nor
 Crawl4AI is used anywhere in this module; the search query strategy,
 source preferences, and extraction rules all live in the prompt templates
 (app/prompts/gst_search.md, app/prompts/turnover_search.md), never
@@ -21,7 +21,7 @@ from services.browser_service import BrowserService
 from services.gst_turnover_enrichment import ai_validator, confidence
 from services.gst_turnover_enrichment.gst_extraction import find_valid_gstins
 from services.gst_turnover_enrichment.models import FieldResult, GstTurnoverResult, SourceCandidate
-from services.gst_turnover_enrichment.openai_research_client import AIResearchResult, OpenAIResearchClient
+from services.gst_turnover_enrichment.gemini_research_client import AIResearchResult, GeminiResearchClient
 
 logger = logging.getLogger(__name__)
 _LOG_TAG = {"GST Number": "GST", "Turnover": "TURNOVER"}
@@ -73,18 +73,18 @@ def _store_field(identity: tuple, field_name: str, result: FieldResult) -> None:
 
 
 class GstTurnoverEnrichmentService:
-    """Researches GST/turnover via OpenAI's Responses API + hosted web
-    search - one self-contained research call per field, replacing the
+    """Researches GST/turnover via Gemini + Google Search grounding -
+    one self-contained research call per field, replacing the
     previous SearXNG-search + Crawl4AI-crawl pipeline entirely."""
 
     def __init__(
         self, browser: BrowserService,
-        research: Optional[OpenAIResearchClient] = None,
+        research: Optional[GeminiResearchClient] = None,
     ):
         # ``browser`` remains an injected argument for compatibility with the
         # existing EnrichmentAgent construction; it is deliberately unused.
         self._browser = browser
-        self._research = research or OpenAIResearchClient()
+        self._research = research or GeminiResearchClient()
 
     def resolve(
         self, company_name: str, website: Optional[str] = None, gst: Optional[str] = None,
@@ -92,10 +92,10 @@ class GstTurnoverEnrichmentService:
         official_name: Optional[str] = None, address: Optional[str] = None, cin: Optional[str] = None,
         turnover: Optional[str] = None,
     ) -> GstTurnoverResult:
-        """Resolve fields independently via OpenAI web-search research.
+        """Resolve fields independently via Gemini web-search research.
 
         The two fields run concurrently - each is a single, self-contained
-        OpenAI Responses API call (its own real web search + reasoning),
+        Gemini API call (its own Google Search grounding + reasoning),
         sharing no state - same reasoning the previous SearXNG/Crawl4AI
         calls relied on for safe concurrent use of a plain ThreadPoolExecutor.
         """
