@@ -20,6 +20,12 @@ CATEGORY_ADDRESS_SELECTOR = ".W4Efsd"
 PHONE_SELECTOR = ".UsdlK"
 CATEGORY_ADDRESS_SEPARATOR = " · "
 HOURS_LINE_PREFIXES = ("open", "closed", "closes", "opens")
+GENERIC_MAPS_NAMES = {
+    "google maps",
+    "maps",
+    "search google maps",
+    "google",
+}
 MAX_SCROLL_ATTEMPTS = 25
 PLATEAU_LIMIT = 3
 
@@ -237,7 +243,9 @@ class GoogleMapsProvider(BaseProvider):
 
     def _parse_card(self, card: Locator) -> Company:
 
-        name = card.locator(NAME_SELECTOR).first.inner_text().strip()
+        name = self._extract_name(card)
+        if not name:
+            raise ValueError("Google Maps result did not contain a business name")
         category, address = self._extract_category_and_address(card)
 
         return Company(
@@ -255,6 +263,30 @@ class GoogleMapsProvider(BaseProvider):
             # check it for real instead of rubber-stamping the query itself.
             industry=category,
         )
+
+    @staticmethod
+    def _extract_name(card: Locator) -> Optional[str]:
+        """Return a business name from the result, never a Maps UI label.
+
+        Google's result-card CSS classes are undocumented and can drift. Use
+        the visible title when available, then the result link's accessible
+        label as a fallback. Invalid cards are skipped by _extract_companies.
+        """
+        candidates: list[Optional[str]] = []
+        title = card.locator(NAME_SELECTOR)
+        if title.count():
+            candidates.append(title.first.inner_text())
+
+        result_link = card.locator(RESULT_LINK_SELECTOR)
+        if result_link.count():
+            candidates.append(result_link.first.get_attribute("aria-label"))
+
+        for candidate in candidates:
+            name = " ".join((candidate or "").split()).strip(" ·,|-")
+            if not name or name.casefold() in GENERIC_MAPS_NAMES:
+                continue
+            return name
+        return None
 
     def _extract_website(self, card: Locator) -> Optional[str]:
 
