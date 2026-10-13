@@ -157,7 +157,7 @@ class ProductionLeadCommonImportDTOTemplateTests(unittest.TestCase):
     TEMPLATE_HEADERS = [
         "Company", "Lead Name", "Description", "Contact Name", "Designation",
         "Contact Mobile No", "Contact Email", "Address1", "City", "GST",
-        "Turnover", "Remarks", "Stage", "Incharge", "Alloted To", "Source Detail",
+        "Turnover", "Remarks", "Stage", "Incharge", "Alloted To", "Source Detail", "Industry_type",
     ]
 
     def setUp(self):
@@ -188,6 +188,7 @@ class ProductionLeadCommonImportDTOTemplateTests(unittest.TestCase):
             address="12 Industrial Estate",
             remarks="Interested in bulk order",
             turnover="25 Cr",
+            industry="Industrial Valves",
         )
         out = self._export([company])
         wb = load_workbook(out)
@@ -206,6 +207,7 @@ class ProductionLeadCommonImportDTOTemplateTests(unittest.TestCase):
         self.assertEqual(row["GST"], "27FOCET1234F1Z5")
         self.assertEqual(row["City"], "Coimbatore")
         self.assertEqual(row["Turnover"], "25 Cr")
+        self.assertEqual(row["Industry_type"], "Industrial Valves")
         self.assertEqual(row["Remarks"], "Interested in bulk order")
         self.assertEqual(row["Address1"], "12 Industrial Estate")
 
@@ -292,7 +294,7 @@ class ExportAgentMasterFileTransitionTests(unittest.TestCase):
             [
                 "Company", "Lead Name", "Description", "Contact Name", "Designation",
                 "Contact Mobile No", "Contact Email", "Address1", "City", "GST",
-                "Turnover", "Remarks", "Stage", "Incharge", "Alloted To", "Source Detail",
+                "Turnover", "Remarks", "Stage", "Incharge", "Alloted To", "Source Detail", "Industry_type",
             ],
         )
         self.assertNotIn("Alternate Mobile Number", headers)
