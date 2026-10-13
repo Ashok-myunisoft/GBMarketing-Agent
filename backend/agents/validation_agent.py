@@ -315,6 +315,10 @@ class ValidationAgent(BaseClass):
             digits = re.sub(r"\D+", "", number)
             if len(digits) >= 7:
                 keys.add(f"phone:{digits[-10:]}")
+        if company.industry:
+            normalized_industry = re.sub(r"\W+", "", company.industry).lower()
+            if normalized_industry:
+                keys.add(f"industry:{normalized_industry}")
         name = re.sub(r"\W+", "", company.company_name).lower()
         if name:
             keys.add(f"name:{name}")
@@ -472,4 +476,5 @@ class ValidationAgent(BaseClass):
             email=get("emailid", "email"),
             phone=get("mobilenumber", "contactnumber", "phone", "mobile"),
             phone_alt=get("alternatemobilenumber", "alternatephone", "altphone"),
+            industry=get("industrytype", "industry_type", "industry", "sector", "businesscategory"),
         )
