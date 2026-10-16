@@ -315,10 +315,8 @@ class ValidationAgent(BaseClass):
             digits = re.sub(r"\D+", "", number)
             if len(digits) >= 7:
                 keys.add(f"phone:{digits[-10:]}")
-        if company.industry:
-            normalized_industry = re.sub(r"\W+", "", company.industry).lower()
-            if normalized_industry:
-                keys.add(f"industry:{normalized_industry}")
+        # Industry is a category shared by many unrelated companies, so it
+        # must never be used as an identity key for duplicate detection.
         name = re.sub(r"\W+", "", company.company_name).lower()
         if name:
             keys.add(f"name:{name}")
