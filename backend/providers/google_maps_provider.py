@@ -283,7 +283,10 @@ class GoogleMapsProvider(BaseProvider):
 
         for candidate in candidates:
             name = " ".join((candidate or "").split()).strip(" ·,|-")
-            if not name or name.casefold() in GENERIC_MAPS_NAMES:
+            normalized = name.casefold()
+            # Google occasionally puts its page/brand label in the title or aria-label slot,
+            # sometimes with extra text. Never treat that UI text as a business listing.
+            if not name or normalized in GENERIC_MAPS_NAMES or "google maps" in normalized:
                 continue
             return name
         return None
