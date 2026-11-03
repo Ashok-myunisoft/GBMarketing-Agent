@@ -10,7 +10,7 @@ import psycopg2.extras
 from psycopg2 import sql
 
 from config.geography import location_query_variants, parse_address_components
-from config.targeting import search_industry_queries
+from config.targeting import match_target_industry
 from core.config import settings
 from schemas.company import Company
 from schemas.search_request import SearchRequest
@@ -44,6 +44,23 @@ class DiscoveredCompaniesRepository:
         "state", "state_name", "region", "location", "location_name", "company_location",
         "locations",
     )
+
+    @staticmethod
+    def _is_broad_manufacturing_request(industry: str) -> bool:
+        """Broad manufacturing means all industries at the requested location.
+
+        Specific phrases such as "textile manufacturing" remain industry
+        filters even if the taxonomy only recognizes the generic word.
+        """
+        if match_target_industry(industry) != "Manufacturing":
+            return False
+        words = set(industry.casefold().replace("&", " ").split())
+        generic_words = {
+            "manufacturing", "manufacturer", "manufacturers", "industry",
+            "industries", "company", "companies", "business", "businesses",
+            "in", "the", "all", "of",
+        }
+        return not (words - generic_words)
 
     def __init__(self, dsn: Optional[str] = None):
         self._dsn = dsn if dsn is not None else settings.DISCOVERED_COMPANIES_DATABASE_URL
@@ -81,7 +98,7 @@ class DiscoveredCompaniesRepository:
                 conditions = []
                 parameters: list[Any] = []
                 industry = (request.industry or "").strip()
-                if industry:
+                if industry and not self._is_broad_manufacturing_request(industry):
                     industry_columns = self._matching_columns(
                         column_lookup, self._INDUSTRY_FILTER_COLUMNS
                     )
@@ -89,7 +106,7 @@ class DiscoveredCompaniesRepository:
                         raise RuntimeError(
                             "public.discovered_companies has no recognized industry column."
                         )
-                    terms = list(dict.fromkeys([industry, *search_industry_queries(industry)]))
+                    terms = [industry]
                     condition, values = self._text_match(industry_columns, terms)
                     conditions.append(condition)
                     parameters.extend(values)
