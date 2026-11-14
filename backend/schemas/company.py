@@ -54,6 +54,11 @@ class Company(BaseModel):
     field_confidence: dict[str, int] = Field(default_factory=dict)
     field_evidence: dict[str, str] = Field(default_factory=dict)
     field_sources: dict[str, str] = Field(default_factory=dict)
+    # Provenance from the database-backed search source. Optional so provider
+    # and legacy callers retain their existing contract.
+    source_table: Optional[str] = None
+    source_row_id: Optional[str] = None
+    source_metadata: dict[str, object] = Field(default_factory=dict, exclude=True)
     # Internal enrichment metadata; deliberately not part of the fixed Excel
     # layout so existing workbooks remain compatible.
     field_status: dict[str, str] = Field(default_factory=dict)

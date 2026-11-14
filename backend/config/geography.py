@@ -376,7 +376,16 @@ def classify_location(
     # unseeded requested city (e.g. "Nagpur") lets this branch apply at full
     # district precision instead of only ever reaching the broader state
     # fallback inside it.
-    requested_district = canonical_district(requested) or requested_geocoded_district
+    requested_locality = canonical_locality(requested)
+    # Geoapify can return a locality (for example, Ambattur) in its
+    # ``district`` slot. If the requested place is already recognized as a
+    # locality, do not let that broader district branch run first: compare
+    # the company's locality below, then use the locality's parent city/state
+    # as fallback evidence. This prevents Chennai companies from being
+    # rejected merely because Ambattur was mislabeled as a requested district.
+    requested_district = canonical_district(requested) or (
+        requested_geocoded_district if not requested_locality else None
+    )
     if requested_district:
         # company_district is a structured field (the same trust level the
         # plain-city branch below already gives company_city) - not just
@@ -386,6 +395,16 @@ def classify_location(
         # never hand-added there. Falling back to canonical_district(...)
         # first still normalizes a known district's spelling variants.
         actual_district = canonical_district(company_district) or company_district
+        # Geoapify can put a Chennai ward/neighbourhood (for example,
+        # "Ward 131" or "Venkatapuram") in its district field. When the
+        # resolved city is Chennai and that value is not a recognized
+        # district, use Chennai's trusted city-to-district mapping instead
+        # of rejecting a Chennai lead as outside Chennai.
+        if (
+            canonical_city(company_city) == "Chennai"
+            and not canonical_district(company_district)
+        ):
+            actual_district = CITY_DISTRICTS["Chennai"]
         if not actual_district and company_city:
             actual_district = CITY_DISTRICTS.get(canonical_city(company_city) or company_city)
         if not actual_district:
@@ -426,12 +445,28 @@ def classify_location(
     # A known locality is more specific than a city.  A city-level record is
     # insufficient to confirm it, but an explicitly different locality in the
     # same city is reliable conflicting evidence.
-    requested_locality = canonical_locality(requested)
     if requested_locality:
         actual_city = canonical_city(company_city)
         actual_locality = canonical_locality(company_locality, actual_city) or canonical_locality(company_address, actual_city)
         if actual_locality:
             if _normalize(actual_locality) == _normalize(requested_locality):
+                # A matching locality label must still agree with any
+                # independently known parent city/state. This prevents a
+                # conflicting Mumbai/Gujarat record from passing merely
+                # because its source row also carries an Ambattur tag.
+                requested_locality_city = city_for_locality(requested_locality)
+                address_city = actual_city or canonical_city(company_address)
+                if requested_locality_city and address_city and _normalize(address_city) != _normalize(requested_locality_city):
+                    return "outside", (
+                        f"resolved city '{address_city}' does not match '{requested_locality_city}' "
+                        f"(parent city of requested locality '{requested_locality}')"
+                    )
+                conflicting_state = _state_conflict(company_state, company_address, requested_state_hint)
+                if conflicting_state:
+                    return "outside", (
+                        f"resolved state '{conflicting_state}' does not match '{requested_state_hint}' "
+                        f"(state of requested locality '{requested_locality}')"
+                    )
                 return "match", f"company locality '{actual_locality}' matches requested locality '{requested_locality}'"
             return "outside", f"resolved locality '{actual_locality}' does not match requested locality '{requested_locality}'"
         # No specific locality match either way - but the *city* the address

@@ -3,17 +3,18 @@
 import csv
 import re
 from pathlib import Path
-from typing import Iterator, Optional
-from urllib.parse import urlparse
+from typing import Any, Iterator, Optional
 
 import logging
 
 from agents.base_agent import BaseClass
-from config.geography import classify_location
+from config.geography import canonical_city, classify_location
 from config.targeting import match_target_industry, parse_turnover_range, turnover_to_crore
 from schemas.company import Company
 from services.geocoding_service import GeoapifyGeocodingService
 from services.mlead.repository import MleadRepository
+from services.company_identity import company_composite_key, is_generic_maps_label
+from services.marketing_location import marketing_location
 
 
 logger = logging.getLogger(__name__)
@@ -48,18 +49,18 @@ class ValidationAgent(BaseClass):
         requested_turnover_floor_cr: Optional[float] = None,
         requested_employee_floor: Optional[float] = None,
         requested_gst_required: bool = False,
+        max_new_companies: Optional[int] = None,
     ) -> list[Company]:
         source = Path(existing_excel_path) if existing_excel_path else DEFAULT_EXISTING_DATA_DIR
-        existing_keys = self._load_existing_keys(source)
+        baseline_index = self._load_existing_key_sources(source)
         if MASTER_EXPORT_PATH.exists():
-            existing_keys.update(self._load_existing_keys(MASTER_EXPORT_PATH))
+            self._merge_baseline_indexes(baseline_index, self._load_existing_key_sources(MASTER_EXPORT_PATH))
 
         # Persistent baseline: existing production leads in PostgreSQL
         # public."TLead" (~136 historical rows plus anything since accepted),
         # so history survives container stop/restart/recreate (the
         # file-based baseline above lives inside the container). Reuses
-        # the exact same _company_keys matching used everywhere else in
-        # this method - it does not introduce a second matching rule.
+        # the same company + industry + location key used for report files.
         postgres_key_to_id: dict[str, int] = {}
         for row in self._load_mlead_rows():
             history_company = Company(
@@ -69,15 +70,25 @@ class ValidationAgent(BaseClass):
                 email=row.get("email_id"),
                 phone=row.get("mobile_number"),
                 phone_alt=row.get("alternate_mobile_number"),
-                city=row.get("city"),
+                # Marketing stores a display value such as "Ambattur, Chennai"
+                # in its single city column. Recover the parent city for the
+                # existing duplicate key and geography checks.
+                city=canonical_city(row.get("city")) or row.get("city"),
                 industry=row.get("industry_type"),
                 region=row.get("region"),
                 contact_person=row.get("contact_person"),
                 designation=row.get("designation"),
             )
-            for key in self._company_keys(history_company):
-                existing_keys.add(key)
-                postgres_key_to_id[key] = row["lead_id"]
+            history_keys = self._company_keys(history_company)
+            reference = {
+                "source": 'PostgreSQL public."TLead"',
+                "record_id": str(row.get("lead_id")) if row.get("lead_id") is not None else None,
+                "identity_keys": history_keys,
+            }
+            for key in history_keys:
+                baseline_index.setdefault(key, []).append(reference)
+                if row.get("lead_id") is not None:
+                    postgres_key_to_id[key] = row["lead_id"]
 
         kept: list[Company] = []
         duplicate_count = 0
@@ -85,6 +96,7 @@ class ValidationAgent(BaseClass):
         out_of_area_count = 0
         location_unknown_count = 0
         no_identifier_count = 0
+        scanned_count = 0
         removed: list[dict] = []
 
         # Geocoded once here, for the whole run - never per company - since
@@ -99,25 +111,49 @@ class ValidationAgent(BaseClass):
         requested_geocoded = self._geocoder.geocode(requested_location) if requested_location else None
 
         for company in companies:
+            # This only caps how many new leads this run accepts. Existing
+            # duplicate, location, and eligibility decisions remain unchanged.
+            if max_new_companies is not None and len(kept) >= max_new_companies:
+                break
+            scanned_count += 1
             name = company.company_name or "(unnamed)"
             keys = self._company_keys(company)
             if not keys:
                 no_identifier_count += 1
-                removed.append({
-                    "company_name": name,
-                    "reason": "no identifying details (name, GST, website, phone, or email) to validate against",
-                })
-                continue
             # Do not remove one newly extracted result merely because another
-            # provider/locality returned it in this same run.  Validation's
-            # deduplication authority is the established export/database
-            # baseline below; search-stage deduplication remains responsible
-            # for collapsing obvious name+website repeats.
-            if keys & existing_keys:
+            # provider/locality returned it in this same run. Validation's
+            # duplicate authority is the established report/TLead baseline;
+            # duplicates require the same company name, industry, and location.
+            matched_records = []
+            for key in sorted(keys):
+                for baseline in baseline_index.get(key, []):
+                    matched_records.append((key, baseline))
+            matched_keys = sorted({key for key, _ in matched_records})
+            if matched_keys:
                 duplicate_count += 1
+                matched_baselines = [
+                    {
+                        "identity_key": key,
+                        "source": baseline["source"],
+                        "record_id": baseline.get("record_id") or "",
+                    }
+                    for key, baseline in matched_records
+                ]
+                first_match = matched_baselines[0]
+                match_summary = "; ".join(
+                    f"{match['identity_key']} matched {match['source']}"
+                    + (f" ({match['record_id']})" if match["record_id"] else "")
+                    for match in matched_baselines
+                )
                 removed.append({
                     "company_name": name,
-                    "reason": "already present in the existing export / dedup baseline",
+                    "reason": f"duplicate: {match_summary}",
+                    "source_table": company.source_table,
+                    "source_row_id": company.source_row_id,
+                    "matched_identity_key": first_match["identity_key"],
+                    "matched_source": first_match["source"],
+                    "matched_record_id": first_match["record_id"] or None,
+                    "matched_baselines": matched_baselines,
                 })
                 # This run's enrichment may have found a field (GST,
                 # turnover, contact info, ...) the existing mlead row never
@@ -127,9 +163,12 @@ class ValidationAgent(BaseClass):
                 # against the mlead baseline specifically (postgres_key_to_id) -
                 # a match against only the file-based baseline has no live
                 # database row to update.
-                existing_lead_id = next(
-                    (postgres_key_to_id[key] for key in keys if key in postgres_key_to_id), None
-                )
+                existing_lead_id = next((
+                    int(match["record_id"])
+                    for match in matched_baselines
+                    if match["source"] == 'PostgreSQL public."TLead"'
+                    and match["record_id"].isdigit()
+                ), None)
                 if existing_lead_id is not None:
                     self._backfill_mlead(existing_lead_id, company)
                 continue
@@ -148,8 +187,19 @@ class ValidationAgent(BaseClass):
                     requested_geocoded_city=requested_geocoded.city if requested_geocoded else None,
                 )
                 logger.info(
-                    "[LOCATION] requested=%s company=%s resolved_city=%s resolved_state=%s decision=%s reason=%s",
-                    requested_location, name, company.city, company.state, decision, reason,
+                    "[LOCATION] requested=%s company=%s source_row_id=%s source_locations=%s "
+                    "company_locality=%s resolved_city=%s resolved_state=%s "
+                    "request_geocoded_district=%s decision=%s reason=%s",
+                    requested_location,
+                    name,
+                    company.source_row_id,
+                    (company.source_metadata or {}).get("_source_locations"),
+                    company.locality,
+                    company.city,
+                    company.state,
+                    requested_geocoded.district if requested_geocoded else None,
+                    decision,
+                    reason,
                 )
                 if decision == "outside":
                     out_of_area_count += 1
@@ -159,6 +209,8 @@ class ValidationAgent(BaseClass):
                             f"located in '{company.city or company.address or 'an unknown location'}', "
                             f"outside the requested area '{requested_location}' ({reason})"
                         ),
+                        "source_table": company.source_table,
+                        "source_row_id": company.source_row_id,
                     })
                     continue
                 if decision == "unknown":
@@ -187,7 +239,6 @@ class ValidationAgent(BaseClass):
                     "remarks": "; ".join(note for note in (company.remarks, "; ".join(notes)) if note),
                 })
                 kept.append(accepted)
-                existing_keys.update(keys)
                 # This is the point the existing workflow treats a lead as
                 # actually accepted (not merely discovered) - the correct
                 # insertion point for the persistent PostgreSQL baseline.
@@ -197,6 +248,8 @@ class ValidationAgent(BaseClass):
                 removed.append({
                     "company_name": name,
                     "reason": "; ".join(note.removeprefix("rejected: ") for note in rejected_notes),
+                    "source_table": company.source_table,
+                    "source_row_id": company.source_row_id,
                 })
 
         # Stashed on the instance (not the return value) so callers that only
@@ -204,7 +257,7 @@ class ValidationAgent(BaseClass):
         # these to report why a run added little/nothing new, and exactly
         # why each individual company was dropped.
         self.last_run_stats = {
-            "scanned": len(companies),
+            "scanned": scanned_count,
             "new": len(kept),
             "duplicates": duplicate_count,
             "rejected": rejected_count,
@@ -298,29 +351,30 @@ class ValidationAgent(BaseClass):
 
     @staticmethod
     def _company_keys(company: Company) -> set[str]:
-        keys: set[str] = set()
-        if company.gst:
-            normalized_gst = re.sub(r"\W+", "", company.gst).upper()
-            keys.add(f"gst:{normalized_gst}")
-        if company.website:
-            parsed = urlparse(company.website if "://" in company.website else f"https://{company.website}")
-            host = parsed.netloc.lower().removeprefix("www.")
-            if host and "tradeindia.com" not in host:
-                keys.add(f"website:{host}")
-        if company.email:
-            keys.add(f"email:{company.email.strip().lower()}")
-        for number in (company.phone, company.phone_alt):
-            if not number:
-                continue
-            digits = re.sub(r"\D+", "", number)
-            if len(digits) >= 7:
-                keys.add(f"phone:{digits[-10:]}")
-        # Industry is a category shared by many unrelated companies, so it
-        # must never be used as an identity key for duplicate detection.
-        name = re.sub(r"\W+", "", company.company_name).lower()
-        if name:
-            keys.add(f"name:{name}")
-        return keys
+        key = company_composite_key(company)
+        return {key} if key else set()
+
+    @staticmethod
+    def _merge_baseline_indexes(target: dict, source: dict) -> None:
+        for key, records in source.items():
+            target.setdefault(key, []).extend(records)
+
+    def _load_existing_key_sources(self, path: Path) -> dict[str, list[dict[str, Any]]]:
+        if not path.exists():
+            return {}
+        files = [path] if path.is_file() else [*path.rglob("*.csv"), *path.rglob("*.xlsx")]
+        index: dict[str, list[dict[str, Optional[str]]]] = {}
+        for file_path in files:
+            for row_number, company in enumerate(self._read_existing_companies(file_path), start=2):
+                company_keys = self._company_keys(company)
+                reference = {
+                    "source": f"file {file_path.name}",
+                    "record_id": f"row {row_number}",
+                    "identity_keys": company_keys,
+                }
+                for key in company_keys:
+                    index.setdefault(key, []).append(reference)
+        return index
 
     def _load_mlead_rows(self) -> list[dict]:
         """Read the PostgreSQL public."TLead" baseline.
@@ -370,7 +424,7 @@ class ValidationAgent(BaseClass):
                 mobile_number=company.phone,
                 alternate_mobile_number=company.phone_alt,
                 email_id=company.email,
-                city=company.city,
+                city=marketing_location(company),
                 address=company.address,
                 industry_type=company.industry,
                 region=company.region,
@@ -407,7 +461,7 @@ class ValidationAgent(BaseClass):
                 mobile_number=company.phone,
                 alternate_mobile_number=company.phone_alt,
                 email_id=company.email,
-                city=company.city,
+                city=marketing_location(company),
                 address=company.address,
                 industry_type=company.industry,
                 region=company.region,

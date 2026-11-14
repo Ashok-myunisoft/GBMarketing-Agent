@@ -8,10 +8,17 @@ class RemovedCompany(BaseModel):
     """One company that didn't make it into the final results, and why."""
 
     company_name: str
-    # Pipeline stage that dropped it: "validation" (duplicate/out-of-area/
-    # ICP rejection).
+    # Pipeline stage that dropped it (search_filter, search_dedup, validation).
     stage: str
     reason: str
+    source_table: Optional[str] = None
+    source_row_id: Optional[str] = None
+    matched_identity_key: Optional[str] = None
+    matched_source: Optional[str] = None
+    matched_record_id: Optional[str] = None
+    matched_baselines: List[dict[str, str]] = Field(default_factory=list)
+    source_row_ids: List[str] = Field(default_factory=list)
+    occurrence_count: int = 1
 
 
 class PipelineStats(BaseModel):

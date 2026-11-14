@@ -1,8 +1,14 @@
 import sys
+import logging
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routers import router
+
+# Make application INFO diagnostics (including [PERF] timings) visible when
+# launched directly or through Uvicorn's standard logging configuration.
+logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(logging.INFO)
 
 # Support both `python backend/main.py` and `uvicorn backend.main:app`
 # without requiring callers to set PYTHONPATH.

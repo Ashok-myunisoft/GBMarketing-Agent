@@ -16,6 +16,8 @@ export type Company = {
   linkedin_url?: string | null;
   validation_status: "pending" | "validated" | "unverified" | "rejected";
   validation_notes: string[];
+  source_table?: string | null;
+  source_row_id?: string | null;
 };
 
 export type ValidationStats = {
@@ -29,8 +31,16 @@ export type ValidationStats = {
 
 export type RemovedCompany = {
   company_name: string;
-  stage: "search_dedup" | "validation";
+  stage: "search_filter" | "search_dedup" | "validation";
   reason: string;
+  source_table?: string | null;
+  source_row_id?: string | null;
+  matched_identity_key?: string | null;
+  matched_source?: string | null;
+  matched_record_id?: string | null;
+  matched_baselines?: { identity_key: string; source: string; record_id: string }[];
+  source_row_ids?: string[];
+  occurrence_count?: number;
 };
 
 export type PipelineStats = {

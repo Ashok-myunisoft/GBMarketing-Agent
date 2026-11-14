@@ -12,6 +12,7 @@ from playwright.sync_api import BrowserContext, Page
 from agents.base_agent import BaseClass
 from config.geography import (
     CITY_DISTRICTS,
+    CITY_STATE,
     canonical_city,
     canonical_district,
     canonical_locality,
@@ -28,12 +29,11 @@ from services.contact_extraction.page_classifier import classify as classify_pag
 from services.contact_extraction.pipeline import ContactExtractionPipeline
 from services.geocoding_service import GeoapifyGeocodingService
 from services.filesure_service import FileSureService
-from services.gst_turnover_service import GstTurnoverService, JAMKU_GSTIN_URL_TEMPLATE
 from services.gst_turnover_enrichment.service import GstTurnoverEnrichmentService
-from services.gst_turnover_enrichment.confidence import TURNOVER_SOURCE_POINTS
 from services.gst_turnover_enrichment.firecrawl_client import FirecrawlClient
 from services.gst_turnover_enrichment.gst_extraction import find_valid_gstin
-from services.enrichment.company_enrichment import CompanyTavilyEnrichmentService
+from services.enrichment.company_enrichment import CompanyTavilyEnrichmentService, TavilyEnrichmentResult
+from services.company_identity import is_generic_maps_label
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ ADDRESS_HINT_WORDS = (
     "road", "street", "nagar", "estate", "industrial", "layout", "floor",
     "building", "complex", "colony", "phase", "block", "marg", "sector",
 )
+_MARKETPLACE_DOMAINS = ("tradeindia.com",)
 @contextmanager
 def _timed(company_name: str, stage: str):
     """Logs how long one enrichment stage took for one company, at INFO
@@ -64,8 +65,6 @@ CONTACT_PAGE_LINK_TEXT = (
     "contact", "about", "team", "management", "leadership", "legal",
     "privacy", "terms", "gst", "company-info",
 )
-TOFLER_URL = "https://www.tofler.in/"
-TOFLER_SEARCH_INPUT = 'input[placeholder="Search company, CIN OR DIN"]'
 LINKEDIN_LOGIN_URL = "https://www.linkedin.com/login"
 LINKEDIN_PEOPLE_SEARCH_URL = "https://www.linkedin.com/search/results/people/?keywords="
 
@@ -81,14 +80,6 @@ class EnrichmentAgent(BaseClass):
        markup), so this is inherently best-effort - verified by hand
        against several live company sites before writing this, coverage
        will never be 100%.
-    2. Tofler's free company-registry lookup (by company name), used
-       only for whatever the website didn't provide, or when there's no
-       website at all. Tofler's actual turnover/revenue/employee-count
-       figures are paywalled behind "GET PRO" - confirmed by hand on a
-       real company profile page - so this never attempts to read
-       those, only the freely visible registered office address and
-       registered company email.
-
     Companies where neither source yields anything, or where lookups
     fail outright, are returned unchanged rather than dropped from the
     list.
@@ -111,7 +102,6 @@ class EnrichmentAgent(BaseClass):
         browser: Optional[BrowserService] = None,
         geocoder: Optional[GeoapifyGeocodingService] = None,
         filesure: Optional[FileSureService] = None,
-        turnover: Optional[GstTurnoverService] = None,
         tavily_enrichment: Optional[CompanyTavilyEnrichmentService] = None,
         firecrawl: Optional[FirecrawlClient] = None,
     ):
@@ -124,17 +114,14 @@ class EnrichmentAgent(BaseClass):
         )
         self._geocoder = geocoder or GeoapifyGeocodingService()
         self._filesure = filesure or FileSureService()
-        # gst.jamku.app's Aggregate Turnover slab - the only source in this
-        # pipeline that reads real GST-filing-derived turnover data for
-        # private/SME companies rather than hoping a number is published in
-        # plain text somewhere. Used below only for whatever GST/turnover
-        # resolution still hasn't filled in.
-        self._turnover = turnover or GstTurnoverService(self._browser)
         # Plain HTTPS API, no Playwright involved - used by Tavily's own PDF
-        # fetching below (services/enrichment/company_enrichment.py), not by
-        # GST/turnover (see services/gst_turnover_enrichment, which searches
-        # via SearXNG and crawls via Crawl4AI instead).
-        self._firecrawl = firecrawl or FirecrawlClient()
+        # fetching below (services/enrichment/company_enrichment.py). GST and
+        # turnover are handled by the Gemini-based service below.
+        self._firecrawl = (
+            firecrawl or FirecrawlClient()
+            if settings.ENRICHMENT_USE_TAVILY_PIPELINE
+            else None
+        )
         self._gst_turnover = GstTurnoverEnrichmentService(self._browser)
         # Tavily's gather() also drives a Playwright browser of its own for
         # some of its page fetches (services/crawler/html_crawler.py), and
@@ -146,7 +133,7 @@ class EnrichmentAgent(BaseClass):
         # is the one building the CompanyTavilyEnrichmentService itself; an
         # injected `tavily_enrichment` (tests) owns its own browser choice.
         self._tavily_browser = (
-            None if tavily_enrichment else BrowserService(
+            None if tavily_enrichment or not settings.ENRICHMENT_USE_TAVILY_PIPELINE else BrowserService(
                 timeout_ms=settings.ENRICHMENT_PLAYWRIGHT_TIMEOUT_MS, max_retries=1,
             )
         )
@@ -159,7 +146,11 @@ class EnrichmentAgent(BaseClass):
         # so PDF enrichment in the Tavily pass and GST/turnover enrichment
         # aren't independently rate-limited against the same Firecrawl
         # deployment.
-        self._tavily = tavily_enrichment or CompanyTavilyEnrichmentService(self._tavily_browser, firecrawl=self._firecrawl)
+        self._tavily = (
+            tavily_enrichment or CompanyTavilyEnrichmentService(self._tavily_browser, firecrawl=self._firecrawl)
+            if settings.ENRICHMENT_USE_TAVILY_PIPELINE
+            else None
+        )
         self._linkedin_context: Optional[BrowserContext] = None
         self._linkedin_authenticated = False
         self._linkedin_unavailable = False
@@ -182,12 +173,17 @@ class EnrichmentAgent(BaseClass):
     def execute(self, companies: List[Company]) -> List[Company]:
 
         print("\n========== Enrichment Agent Started ==========")
+        batch_started = time.monotonic()
 
         # Playwright's synchronous API is thread-affine, so every worker owns
         # its own agent/browser rather than sharing this agent's browser across
         # threads.  This preserves the same extraction rules while overlapping
         # slow remote requests from different companies.
         worker_count = min(settings.ENRICHMENT_CONCURRENCY, len(companies)) if companies else 0
+        logger.info(
+            "[PERF] enrichment batch started companies=%d workers=%d tavily_enabled=%s",
+            len(companies), worker_count, settings.ENRICHMENT_USE_TAVILY_PIPELINE,
+        )
         if worker_count <= 1:
             enriched = self._enrich_batch(companies)
         else:
@@ -216,6 +212,10 @@ class EnrichmentAgent(BaseClass):
             f"{found_city}/{len(enriched)} with city, {found_region}/{len(enriched)} with region"
         )
         print("========== Enrichment Agent Completed ==========")
+        logger.info(
+            "[PERF] enrichment batch completed companies=%d elapsed_ms=%d",
+            len(enriched), round((time.monotonic() - batch_started) * 1000),
+        )
 
         return enriched
 
@@ -236,8 +236,6 @@ class EnrichmentAgent(BaseClass):
             if self._linkedin_context is not None:
                 self._linkedin_context.close()
                 self._linkedin_context = None
-            if self._turnover is not None:
-                self._turnover.close()
             self._filesure_executor.shutdown(wait=False, cancel_futures=True)
             if tavily_owns_lifecycle:
                 self._tavily_executor.submit(self._tavily_browser.stop).result()
@@ -258,7 +256,7 @@ class EnrichmentAgent(BaseClass):
             try:
                 return self._enrich_impl(company)
             except Exception:
-                # Every individual source (website, Tofler, LinkedIn, GST/turnover,
+                # Every individual source (website, LinkedIn, GST/turnover,
                 # LLM extraction) already degrades gracefully on its own failure -
                 # this is the backstop for anything else (a schema edge case, an
                 # unhandled library exception) that would otherwise abort this
@@ -302,7 +300,7 @@ class EnrichmentAgent(BaseClass):
         # an empty result whenever TAVILY_API_KEY isn't configured. Its
         # output is never applied directly - it only feeds candidates into
         # the same GST/turnover/contact scoring machinery below, and fills
-        # whatever the website crawl/Tofler/FileSure fallbacks still miss.
+        # whatever the website crawl/FileSure fallbacks still miss.
         #
         # It never depends on the website crawl's output below (called with
         # the company's original name/website, never the official name/URL
@@ -316,38 +314,40 @@ class EnrichmentAgent(BaseClass):
             tavily_future = self._tavily_executor.submit(
                 self._tavily.gather, company.company_name, company.website
             )
-        else:
+        elif self._tavily is not None:
             tavily_future = None
             with _timed(company.company_name, "tavily.gather"):
                 tavily_result = self._tavily.gather(company.company_name, company.website)
+        else:
+            tavily_future = None
+            tavily_result = TavilyEnrichmentResult()
 
         if company.website and company.website.startswith("http"):
-            with _timed(company.company_name, "website crawl (email/address/contact)"):
-                (
-                    email, address, contact_candidates,
-                    website_cin, website_phones, official_name, official_url,
-                ) = self._enrich_from_website(company, contact_pipeline)
-            cin = cin or website_cin
-            phones.extend(website_phones)
+            logger.info(
+                "[ENRICHMENT] direct website crawl skipped company=%s reason=discovery_db_only",
+                company.company_name,
+            )
 
         if tavily_future is not None:
             with _timed(company.company_name, "tavily.gather (awaiting, overlapped with website crawl)"):
                 tavily_result = tavily_future.result()
 
         email = email or tavily_result.email
+        if self._is_marketplace_support_email(email, official_url or company.website or ""):
+            email = None
+        source_email = company.email
+        if self._is_marketplace_support_email(source_email, official_url or company.website or ""):
+            source_email = None
         address = address or tavily_result.address
         official_url = official_url or tavily_result.website
 
-        # GST Number and Turnover: OpenAI's Responses API (hosted web search)
-        # researches and extracts both fields directly per company, using
-        # the prompt templates in app/prompts/gst_search.md and
-        # turnover_search.md - followed by the jamku turnover-slab fallback.
-        # No Tavily, no SearXNG/Crawl4AI is used here. A value already on
-        # the record (from a prior run/import) is used as-is; the lookup
-        # only runs for whatever is still missing.
+        # Gemini with Google Search grounding researches GST and turnover
+        # using the prompt templates in app/prompts/gst_search.md and
+        # turnover_search.md. Gemini is the only enrichment research source
+        # for GST and turnover. Values already present on a source record are
+        # retained; Gemini research runs only for fields that are missing.
         gst = find_valid_gstin(company.gst) if company.gst else None
         turnover = company.turnover
-        gst_blocked = False
         gst_turnover_result = None
         if not gst or (settings.ENRICHMENT_LOOKUP_TURNOVER and not turnover):
             with _timed(company.company_name, "gst_turnover.resolve"):
@@ -366,15 +366,6 @@ class EnrichmentAgent(BaseClass):
             gst = gst or (gst_turnover_result.gst.value or None)
             turnover = turnover or (gst_turnover_result.turnover.value or None)
 
-        # jamku only looks up by GSTIN, so it can only run once one is known
-        # (from the input record or the resolve() call above) and only for
-        # whatever turnover the steps above still haven't filled in.
-        jamku_turnover = None
-        if settings.ENRICHMENT_LOOKUP_TURNOVER and not turnover and gst:
-            with _timed(company.company_name, "jamku turnover lookup"):
-                jamku_turnover = self._turnover.lookup(gst)
-            turnover = turnover or jamku_turnover
-
         if tavily_result.contact_person:
             tavily_candidate = contact_pipeline.external_candidate(
                 tavily_result.contact_person,
@@ -385,13 +376,7 @@ class EnrichmentAgent(BaseClass):
             if tavily_candidate:
                 contact_candidates.append(tavily_candidate)
 
-        if email is None or address is None:
-            with _timed(company.company_name, "tofler lookup"):
-                tofler_address, tofler_email = self._lookup_tofler(official_name or company.company_name)
-            email = email or tofler_email
-            address = address or tofler_address
-
-        need_filesure = cin and (address is None or gst is None or not contact_candidates)
+        need_filesure = cin and (address is None or not contact_candidates)
         if need_filesure and filesure_future is not None:
             # Started in the background near the top of this method - by now
             # the Tavily/website/GST work above has very likely already
@@ -409,7 +394,6 @@ class EnrichmentAgent(BaseClass):
                 filesure_future.cancel()
         if filesure_data:
             address = address or filesure_data.address
-            gst = gst or filesure_data.gst
             # Wrapped as a candidate rather than a blind fallback fill, so a
             # website hit and an MCA/FileSure hit for the same person raise
             # each other's confidence instead of the first source found
@@ -423,8 +407,8 @@ class EnrichmentAgent(BaseClass):
             if filesure_candidate:
                 contact_candidates.append(filesure_candidate)
 
-        # LinkedIn is a last resort: company websites and public registries
-        # remain the preferred sources for named contacts.
+        # LinkedIn is a last resort: company websites and FileSure remain
+        # the preferred sources for named contacts.
         if settings.ENRICHMENT_LOOKUP_LINKEDIN and not contact_candidates:
             with _timed(company.company_name, "linkedin lookup"):
                 linkedin_contact, linkedin_designation, linkedin_profile = self._lookup_linkedin_contact(company)
@@ -463,9 +447,10 @@ class EnrichmentAgent(BaseClass):
                 break
 
         city, state = parse_address_components(address or company.address)
-        city = city or tavily_result.city
-        state = state or tavily_result.state
+        city = city or tavily_result.city or company.city
+        state = state or tavily_result.state or company.state
         normalized_city = canonical_city(city) or city
+        state = state or CITY_STATE.get(normalized_city)
         district = canonical_district(company.district) or CITY_DISTRICTS.get(normalized_city)
         locality = canonical_locality(company.locality, normalized_city) or canonical_locality(address or company.address, normalized_city)
         if not normalized_city and locality:
@@ -518,17 +503,6 @@ class EnrichmentAgent(BaseClass):
                     "turnover_currency": gst_turnover_result.turnover.currency or "",
                     "turnover_source_type": gst_turnover_result.turnover.source_type or "",
                 })
-        if jamku_turnover:
-            field_confidence = dict(field_confidence)
-            field_sources = dict(field_sources)
-            field_evidence = dict(field_evidence)
-            field_confidence["turnover"] = TURNOVER_SOURCE_POINTS["jamku"]
-            field_sources["turnover"] = JAMKU_GSTIN_URL_TEMPLATE.format(gstin=gst)
-            field_status["turnover"] = "verified"
-            field_evidence["turnover_financial_year"] = ""
-            field_evidence["turnover_metric"] = "Aggregate Turnover Slab"
-            field_evidence["turnover_currency"] = ""
-            field_evidence["turnover_source_type"] = "jamku"
         field_status["contact"] = "verified" if contact_result and contact_result.confidence >= 90 else ("probable" if contact_result else "needs_verification")
 
         remark = None
@@ -548,8 +522,19 @@ class EnrichmentAgent(BaseClass):
 
         enriched = company.model_copy(
             update={
-                "email": email or company.email,
-                "company_name": official_name or company.company_name,
+                "email": email or source_email,
+                # Web extraction can return the Google Maps interface title
+                # instead of a business name. Keep the discovered DB name in
+                # that case; only replace it with a usable extracted name.
+                "company_name": (
+                    official_name
+                    if (
+                        official_name
+                        and not is_generic_maps_label(official_name)
+                        and company.source_table != "public.discovered_companies"
+                    )
+                    else company.company_name
+                ),
                 "website": official_url or company.website,
                 "address": address or company.address,
                 "contact_person": contact_person or company.contact_person,
@@ -580,15 +565,15 @@ class EnrichmentAgent(BaseClass):
                 "field_evidence": field_evidence,
                 "field_sources": field_sources,
                 "field_status": field_status,
-                "turnover_financial_year": None if jamku_turnover else (
+                "turnover_financial_year": (
                     (gst_turnover_result.turnover.financial_year or company.turnover_financial_year)
                     if gst_turnover_result else company.turnover_financial_year
                 ),
-                "turnover_metric": "Aggregate Turnover Slab" if jamku_turnover else (
+                "turnover_metric": (
                     (gst_turnover_result.turnover.metric or company.turnover_metric)
                     if gst_turnover_result else company.turnover_metric
                 ),
-                "turnover_currency": None if jamku_turnover else (
+                "turnover_currency": (
                     (gst_turnover_result.turnover.currency or company.turnover_currency)
                     if gst_turnover_result else company.turnover_currency
                 ),
@@ -716,6 +701,11 @@ class EnrichmentAgent(BaseClass):
                 official_name = self._extract_official_company_name(page)
                 official_url = page.url
                 email = self._extract_email(page)
+                # Directory pages can publish the marketplace's support
+                # address alongside a seller profile. Do not attach that
+                # address to the seller lead.
+                if self._is_marketplace_support_email(email, page.url):
+                    email = None
                 address = self._extract_address(page)
                 contact_candidates = contact_pipeline.extract_from_page(page, page.url, classify_page(page.url))
                 cin = self._extract_cin(page)
@@ -729,6 +719,8 @@ class EnrichmentAgent(BaseClass):
                     except Exception:
                         continue
                     email = email or self._extract_email(page)
+                    if self._is_marketplace_support_email(email, page.url):
+                        email = None
                     address = address or self._extract_address(page)
                     cin = cin or self._extract_cin(page)
                     # Every visited page's candidates are kept, never just the
@@ -836,84 +828,6 @@ class EnrichmentAgent(BaseClass):
         words = normalized.split()
         return len(words) <= 16 and sum(char.isalpha() for char in normalized) >= 3
 
-    def _lookup_tofler(self, company_name: str) -> "tuple[Optional[str], Optional[str]]":
-        """Returns (address, email) from Tofler's free registered-details lookup, or (None, None)."""
-
-        try:
-            context = self._browser.new_context()
-            page = self._browser.new_page(context)
-
-            try:
-                self._browser.goto(page, TOFLER_URL)
-                page.wait_for_timeout(1500)
-
-                search_box = self._find_visible_locator(page, TOFLER_SEARCH_INPUT)
-
-                if search_box is None:
-                    return None, None
-
-                search_box.click(force=True)
-                search_box.fill(company_name, force=True)
-                page.wait_for_timeout(2000)
-
-                suggestions = page.locator('li:has-text("Active"), li:has-text("Inactive")')
-
-                if suggestions.count() == 0:
-                    return None, None
-
-                suggestions.first.click()
-                page.wait_for_timeout(2500)
-
-                return self._extract_tofler_address(page), self._extract_tofler_email(page)
-
-            finally:
-                page.close()
-                context.close()
-
-        except Exception as ex:
-            logger.warning("Tofler lookup failed for '%s': %s", company_name, ex)
-            return None, None
-
-    def _find_visible_locator(self, page: Page, selector: str):
-
-        candidates = page.locator(selector)
-
-        for i in range(candidates.count()):
-            candidate = candidates.nth(i)
-            if candidate.is_visible():
-                return candidate
-
-        return None
-
-    def _extract_tofler_address(self, page: Page) -> Optional[str]:
-
-        address_row = page.locator('tr:has-text("Registered Office")')
-
-        if address_row.count() == 0:
-            return None
-
-        cells = address_row.first.locator("td")
-
-        if cells.count() < 3:
-            return None
-
-        return cells.nth(2).inner_text().strip() or None
-
-    def _extract_tofler_email(self, page: Page) -> Optional[str]:
-
-        email_label = page.locator(':text("Company Email")')
-
-        if email_label.count() == 0:
-            return None
-
-        parent_text = email_label.first.locator("xpath=..").inner_text()
-        lines = [line.strip() for line in parent_text.splitlines() if line.strip()]
-
-        if len(lines) >= 2 and "@" in lines[-1]:
-            return lines[-1]
-
-        return None
-
     def _visit_contact_page(self, page: Page) -> None:
         """Follows a likely contact/about/team link, best-effort."""
 
@@ -971,6 +885,21 @@ class EnrichmentAgent(BaseClass):
         match = EMAIL_PATTERN.search(body_text)
 
         return match.group(0) if match else None
+
+    @staticmethod
+    def _is_marketplace_support_email(email: Optional[str], page_url: str) -> bool:
+        if not email or "@" not in email:
+            return False
+        email_domain = email.rsplit("@", 1)[1].strip().lower().rstrip(".")
+        page_host = urlparse(page_url).hostname
+        if not page_host:
+            return False
+        page_host = page_host.lower().removeprefix("www.").rstrip(".")
+        return any(
+            (page_host == domain or page_host.endswith("." + domain))
+            and (email_domain == domain or email_domain.endswith("." + domain))
+            for domain in _MARKETPLACE_DOMAINS
+        )
 
     def _extract_phones(self, page: Page) -> list[str]:
         """Returns distinct Indian mobile/landline numbers published on the page.

@@ -56,8 +56,14 @@ class SearchService:
         # The city is the broadest, highest-value query.  Only search a
         # locality when it is actually needed to reach the desired lead count.
         search_location(primary_location)
+        primary_result_count = len(all_companies)
+        # Providers occasionally return more than their per-query cap. In that
+        # case the city query already supplied more than the configured batch,
+        # so locality fan-out only adds redundant records. Preserve locality
+        # fallback when the primary query returned at or below its cap.
+        primary_overfilled = primary_result_count > per_query_limit
         for locality in fallback_locations:
-            if len(all_companies) >= request.max_results:
+            if primary_overfilled or len(all_companies) >= request.max_results:
                 break
             search_location(locality)
 

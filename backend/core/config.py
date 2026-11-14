@@ -50,8 +50,8 @@ class Settings:
     # crawl/PDF fetches) won't get any faster from more workers - they all
     # still queue behind the same global FIRECRAWL_MAX_CONCURRENCY /
     # FIRECRAWL_MAX_REQUESTS_PER_MINUTE limiter regardless of worker count.
-    # This only helps the non-Firecrawl-bound stages (website crawl, Tofler,
-    # LinkedIn, jamku, geocoding) overlap across more companies at once.
+    # This only helps the non-Firecrawl-bound stages (website crawl, FileSure,
+    # LinkedIn, geocoding) overlap across more companies at once.
     ENRICHMENT_CONCURRENCY = max(1, int(os.getenv("ENRICHMENT_CONCURRENCY", "5")))
     ENRICHMENT_MAX_SUPPLEMENTAL_PAGES = max(
         0, int(os.getenv("ENRICHMENT_MAX_SUPPLEMENTAL_PAGES", "2"))
@@ -85,7 +85,10 @@ class Settings:
         2_000, int(os.getenv("LLM_EXTRACTION_MAX_DOCUMENT_CHARS", "12000"))
     )
     LLM_EXTRACTION_MAX_TOKENS = max(256, int(os.getenv("LLM_EXTRACTION_MAX_TOKENS", "1000")))
-    ENRICHMENT_USE_TAVILY_PIPELINE = os.getenv("ENRICHMENT_USE_TAVILY_PIPELINE", "true").lower() == "true"
+    # Optional web-search/PDF enrichment is disabled by default. The core
+    # website, registry, GST/turnover, validation, and export paths remain
+    # independent of this setting.
+    ENRICHMENT_USE_TAVILY_PIPELINE = os.getenv("ENRICHMENT_USE_TAVILY_PIPELINE", "false").lower() == "true"
     ENRICHMENT_TAVILY_MIN_CONFIDENCE = int(os.getenv("ENRICHMENT_TAVILY_MIN_CONFIDENCE", "80"))
     ENRICHMENT_TAVILY_MAX_RETRIES = max(0, int(os.getenv("ENRICHMENT_TAVILY_MAX_RETRIES", "1")))
 

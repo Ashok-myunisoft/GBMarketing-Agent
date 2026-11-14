@@ -217,6 +217,10 @@ class PlannerAgent(BaseClass):
                 "Deterministic match is generic 'Manufacturing'; "
                 f"keeping LLM industry: {llm_industry!r}"
             )
+            # When the LLM leaves the industry empty, retain the explicit
+            # broad request so downstream search can distinguish it from an
+            # unconstrained search. The repository treats this as all sectors.
+            return llm_industry or deterministic_match
 
         return llm_industry
 
@@ -264,11 +268,36 @@ class PlannerAgent(BaseClass):
             understanding.location
         )
 
-        deterministic_city = canonical_city(
-            user_query
-        )
+        deterministic_city = canonical_city(user_query)
 
-        if deterministic_city:
+        # Preserve a locality + parent pair from the user's query. The
+        # repository uses both parts as AND constraints against the same
+        # discovered_companies row; reducing this to the canonical city
+        # would silently broaden a locality search to the whole city.
+        comma_location = None
+        comma_position = (user_query or "").rfind(",")
+        if comma_position >= 0:
+            query_prefix = user_query[:comma_position]
+            markers = (" in ", " at ", " near ")
+            marker_positions = [query_prefix.casefold().rfind(marker) for marker in markers]
+            marker_position = max(marker_positions)
+            if marker_position >= 0:
+                marker = markers[marker_positions.index(marker_position)]
+                first = query_prefix[marker_position + len(marker):].strip()
+                second = user_query[comma_position + 1:].strip()
+                second = re.split(
+                    r"\b(?:with|having|for|over|above|below)\b",
+                    second,
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )[0].strip().rstrip(".!?")
+                if first and second:
+                    comma_location = f"{first}, {second}"
+
+        if comma_location:
+            location = comma_location
+            print(f"[PLANNER][LOCATION] Preserving combined location: {location!r}")
+        elif deterministic_city:
             location = deterministic_city
 
             print(

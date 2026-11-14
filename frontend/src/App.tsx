@@ -210,10 +210,11 @@ function PipelineFunnel({ stats }: { stats: PipelineStats }) {
 function RemovedLeads({ stats }: { stats: PipelineStats }) {
   const removed = stats.removed;
   if (!removed.length) return null;
+  const removedCount = removed.reduce((sum, item) => sum + (item.occurrence_count ?? 1), 0);
   return <section className="panel removed-panel">
-    <div className="panel-title"><div><h2>Removed leads <span className="muted">{removed.length}</span></h2><p>Companies found during this run that were dropped before the final results, and why.</p></div></div>
-    <div className="table-wrap"><table><thead><tr><th>Company</th><th>Stage</th><th>Reason</th></tr></thead><tbody>
-      {removed.map((item, index) => <tr key={`${item.company_name}-${index}`}><td><strong>{item.company_name}</strong></td><td className="mono">{item.stage === "search_dedup" ? "Search dedup" : "Validation"}</td><td>{item.reason}</td></tr>)}
+    <div className="panel-title"><div><h2>Removed leads <span className="muted">{removedCount}</span></h2><p>Companies found during this run that were dropped before the final results, and why.</p></div></div>
+    <div className="table-wrap"><table><thead><tr><th>Company</th><th>Stage</th><th>Reason and match</th></tr></thead><tbody>
+      {removed.map((item, index) => <tr key={`${item.company_name}-${index}`}><td><strong>{item.company_name}{(item.occurrence_count ?? 1) > 1 ? ` ×${item.occurrence_count}` : ""}</strong>{item.source_row_ids?.length ? <small className="diagnostic">Source rows: {item.source_row_ids.join(", ")}</small> : item.source_row_id && <small className="diagnostic">Source row: {item.source_table || "unknown table"} · {item.source_row_id}</small>}</td><td className="mono">{item.stage === "search_dedup" ? "Search dedup" : item.stage === "search_filter" ? "Search filter" : "Validation"}</td><td>{item.reason}{(item.matched_baselines?.length || item.matched_identity_key) && <small className="diagnostic">{item.matched_baselines?.length ? item.matched_baselines.map((match, matchIndex) => <span key={`${match.identity_key}-${match.source}-${match.record_id}-${matchIndex}`}>Matched <code>{match.identity_key}</code> in {match.source}{match.record_id ? ` (${match.record_id})` : ""}{matchIndex < (item.matched_baselines?.length ?? 0) - 1 ? "; " : ""}</span>) : <>Matched <code>{item.matched_identity_key}</code> in {item.matched_source || "search result"}{item.matched_record_id ? ` (${item.matched_record_id})` : ""}</>}</small>}</td></tr>)}
     </tbody></table></div>
   </section>;
 }

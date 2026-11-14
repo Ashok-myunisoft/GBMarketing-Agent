@@ -7,6 +7,7 @@ from agents.base_agent import BaseClass
 from core.config import settings
 from schemas.company import Company
 from services.excel_template.template_reader import TemplateLayout, read_template_layout
+from services.marketing_location import marketing_location
 
 import logging
 
@@ -146,6 +147,8 @@ class ExportAgent(BaseClass):
         if field == "extracted_on":
             return extracted_on
         value = getattr(company, field, None)
+        if field == "city":
+            value = marketing_location(company)
         if value is None:
             return ""
         return "; ".join(value) if isinstance(value, list) else value

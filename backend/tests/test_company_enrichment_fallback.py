@@ -17,6 +17,8 @@ class _ExplodingSearchProvider(SearchProvider):
 
 
 class CompanyEnrichmentFallbackTests(unittest.TestCase):
+    @patch("services.enrichment.company_enrichment.settings.ENRICHMENT_USE_TAVILY_PIPELINE", True)
+    @patch("services.enrichment.company_enrichment.settings.ENRICHMENT_USE_TAVILY_PIPELINE", True)
     @patch("services.tavily.tavily_search.settings.TAVILY_API_KEY", None)
     def test_no_api_key_and_no_website_short_circuits_to_an_empty_result(self):
         """With no TAVILY_API_KEY and no known website, there is nothing to
@@ -32,6 +34,7 @@ class CompanyEnrichmentFallbackTests(unittest.TestCase):
         result = service.gather("Example Pumps Pvt Ltd")
         self.assertTrue(result.is_empty())
 
+    @patch("services.enrichment.company_enrichment.settings.ENRICHMENT_USE_TAVILY_PIPELINE", True)
     @patch("services.tavily.tavily_search.settings.TAVILY_API_KEY", None)
     @patch("services.enrichment.company_enrichment.llm_extractor.extract")
     @patch("services.enrichment.company_enrichment.crawl")
@@ -60,6 +63,7 @@ class CompanyEnrichmentFallbackTests(unittest.TestCase):
         mock_extract.assert_called_once()
         self.assertEqual(result.email, "sales@examplepumps.com")
 
+    @patch("services.enrichment.company_enrichment.settings.ENRICHMENT_USE_TAVILY_PIPELINE", True)
     @patch("services.tavily.tavily_search.settings.TAVILY_API_KEY", None)
     @patch("services.enrichment.company_enrichment.llm_extractor.extract")
     @patch("services.enrichment.company_enrichment.crawl")
