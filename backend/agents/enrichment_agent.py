@@ -221,9 +221,25 @@ class EnrichmentAgent(BaseClass):
 
     def _enrich_batch(self, companies: List[Company]) -> List[Company]:
         """Enrich one worker's companies with one browser lifecycle."""
-        owns_lifecycle = not self._browser.is_running
+        # This workflow intentionally skips direct website crawling for
+        # discovery-database records. The injected browser is only needed for
+        # the optional LinkedIn lookup; GST/turnover research uses Gemini and
+        # does not use Playwright. Avoid launching a browser for the normal
+        # database-only path (which is also important in restricted containers
+        # where browser sandboxes may not be available).
+        browser_needed = settings.ENRICHMENT_LOOKUP_LINKEDIN
+        owns_lifecycle = browser_needed and not self._browser.is_running
         if owns_lifecycle:
-            self._browser.start()
+            try:
+                self._browser.start()
+            except Exception:
+                # LinkedIn is an optional enrichment source. A browser startup
+                # failure must not abort enrichment for the whole job.
+                logger.exception(
+                    "Browser startup failed; LinkedIn lookup is unavailable for this batch"
+                )
+                self._linkedin_unavailable = True
+                owns_lifecycle = False
         # Started/stopped via the same single-worker executor gather() itself
         # runs on, so this browser's whole lifecycle - launch, every page
         # fetch, shutdown - stays on the one thread Playwright requires.
