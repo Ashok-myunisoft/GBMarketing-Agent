@@ -1,8 +1,24 @@
-import type { Job, JobEvent } from "./types";
+import type { CRMImportColumn, CRMImportRow, CRMUploadResult, Job, JobEvent } from "./types";
 
 export type ExistingDataFile = { name: string; size: number; updated_at: number };
 
 export const API_BASE =  "http://127.0.0.1:8040"
+let crmSession: string | null = null;
+
+export function hasCRMSession() { return Boolean(crmSession); }
+
+export async function loginToCRM(userCode: string, password: string, connectionName: string) {
+  const result = await request<{ session_id: string; user_name: string; database_name: string }>("/crm/login", {
+    method: "POST", body: JSON.stringify({ user_code: userCode, password, connection_name: connectionName }),
+  });
+  crmSession = result.session_id;
+  return result;
+}
+
+export async function logoutOfCRM() {
+  if (crmSession) await request("/crm/logout", { method: "POST", headers: { "X-CRM-Session": crmSession } });
+  crmSession = null;
+}
 
 export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -31,10 +47,10 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
   return response.json() as Promise<T>;
 }
 
-export function createJob(message: string) {
+export function createJob(message: string, incharge: string, allotedTo: string) {
   return request<Job>("/jobs", {
     method: "POST",
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, incharge, alloted_to: allotedTo }),
   });
 }
 
@@ -46,8 +62,16 @@ export function getJobs() {
   return request<Job[]>("/jobs");
 }
 
+export function getJobCounts() {
+  return request<{ total_jobs: number; completed_runs: number }>("/stats/jobs");
+}
+
 export function getHourlyCompanyStats() {
   return request<unknown>("/stats/companies/hourly");
+}
+
+export function getSavedLeadCount() {
+  return request<{ count: number }>("/stats/leads/saved");
 }
 
 export function getJobEvents(id: string) {
@@ -66,6 +90,24 @@ export function uploadExistingData(file: File) {
 
 export function deleteExistingData(filename: string) {
   return request<void>(`/existing-data/${encodeURIComponent(filename)}`, { method: "DELETE" });
+}
+
+export async function getCRMImportPreview(jobId: string) {
+  return request<{ rows: CRMImportRow[]; columns: CRMImportColumn[] }>(`/jobs/${jobId}/crm-import-preview`);
+}
+
+export function uploadJobRowsToCRM(jobId: string, rows: CRMImportRow[]) {
+  return request<CRMUploadResult>(`/jobs/${jobId}/crm-upload`, {
+    method: "POST",
+    headers: { "X-CRM-Session": crmSession || "" },
+    body: JSON.stringify({ rows }),
+  });
+}
+
+export function uploadFileToCRM(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return request<CRMUploadResult>("/crm/upload-file", { method: "POST", body: form, headers: { "X-CRM-Session": crmSession || "" } });
 }
 
 export const exportUrl = (jobId: string) =>

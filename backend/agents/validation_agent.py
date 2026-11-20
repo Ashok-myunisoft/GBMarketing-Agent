@@ -185,6 +185,7 @@ class ValidationAgent(BaseClass):
                     requested_geocoded_state=requested_geocoded.state if requested_geocoded else None,
                     requested_geocoded_district=requested_geocoded.district if requested_geocoded else None,
                     requested_geocoded_city=requested_geocoded.city if requested_geocoded else None,
+                    company_source_locations=(company.source_metadata or {}).get("_source_locations"),
                 )
                 logger.info(
                     "[LOCATION] requested=%s company=%s source_row_id=%s source_locations=%s "

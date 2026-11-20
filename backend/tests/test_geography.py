@@ -13,6 +13,34 @@ from config.geography import (
 
 
 class ClassifyLocationTests(unittest.TestCase):
+    def test_city_request_accepts_matching_city_with_zone_as_district(self):
+        decision, _ = classify_location(
+            "Coimbatore", "Tamil Nadu", "Coimbatore, Tamil Nadu", "Coimbatore",
+            company_district="North Zone",
+        )
+        self.assertEqual(decision, "match")
+
+    def test_city_request_accepts_source_parent_when_geocoder_returns_subdistrict(self):
+        decision, _ = classify_location(
+            "Karayampalayam", "Tamil Nadu", "Karayampalayam, Coimbatore", "Coimbatore",
+            company_district="Sulur", company_source_locations=["Kurumpapalayam, Coimbatore"],
+        )
+        self.assertEqual(decision, "match")
+
+    def test_city_request_still_rejects_another_known_district(self):
+        decision, _ = classify_location(
+            "Coimbatore", "Tamil Nadu", None, "Coimbatore",
+            company_district="Tiruppur", company_source_locations=["Coimbatore"],
+        )
+        self.assertEqual(decision, "outside")
+
+    def test_locality_request_rejects_another_locality_in_same_city(self):
+        decision, _ = classify_location(
+            "Coimbatore", "Tamil Nadu", "Peelamedu, Coimbatore", "Saravanampatti",
+            company_locality="Peelamedu", company_source_locations=["Peelamedu", "Coimbatore"],
+        )
+        self.assertEqual(decision, "outside")
+
     def test_state_request_matches_any_city_within_that_state(self):
         for city in ("Ahmedabad", "Gandhinagar", "Vadodara"):
             decision, _ = classify_location(city, "Gujarat", f"{city}, Gujarat, India", "Gujarat")

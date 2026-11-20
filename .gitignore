@@ -32,6 +32,9 @@ htmlcov/
 *.log
 logs/
 
+# Local search history
+/backend/data/jobs.sqlite3
+
 # ==========================
 # Frontend
 # ==========================

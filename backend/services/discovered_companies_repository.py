@@ -13,8 +13,11 @@ import psycopg2.extras
 from psycopg2 import sql
 
 from config.geography import (
+    CITY_LOCALITIES,
+    CITY_STATE,
     canonical_city,
     canonical_locality,
+    classify_location,
     city_for_locality,
     location_query_variants,
     parse_address_components,
@@ -170,7 +173,11 @@ class DiscoveredCompaniesRepository:
                     else:
                         # A city-only request remains broad and retains the
                         # existing locality variants for that city.
-                        term_groups = [[term for term in location_query_variants(location) if term]]
+                        terms = [term for term in location_query_variants(location) if term]
+                        city = canonical_city(location)
+                        if city and self._normalize_location_key(location) == self._normalize_location_key(city):
+                            terms.extend(CITY_LOCALITIES.get(city, []))
+                        term_groups = [list(dict.fromkeys(terms))]
 
                     # Resolve plain-text spellings to canonical spellings in
                     # the authoritative JSONB locations array. This is
@@ -294,6 +301,7 @@ class DiscoveredCompaniesRepository:
             column: row.get(column)
             for column in metadata_columns if row.get(column) is not None
         }
+        metadata.update(company.source_metadata or {})
         metadata["_source_company_name"] = company.company_name
         metadata["_source_locations"] = next(
             (value for column, value in row.items() if column.lower() == "locations"),
@@ -358,7 +366,8 @@ class DiscoveredCompaniesRepository:
                                        ELSE jsonb_build_array({column}::jsonb)
                                    END
                                ) AS location_item(value)
-                               WHERE LOWER(location_item.value) = LOWER(%s)
+                               CROSS JOIN LATERAL regexp_split_to_table(location_item.value, ',') AS location_part(value)
+                               WHERE LOWER(BTRIM(location_part.value)) = LOWER(%s)
                            )"""
                     ).format(column=sql.Identifier(column))
                 else:
@@ -366,10 +375,8 @@ class DiscoveredCompaniesRepository:
                         sql.Identifier(column)
                     )
                 comparisons.append(comparison)
-                # The JSONB locations array stores one hierarchy component
-                # per item (for example, ["Ambattur", "Chennai"]). Match
-                # those components exactly; substring matching can pull in
-                # unrelated labels that merely contain the requested text.
+                # Match exact hierarchy components whether stored as separate
+                # array items or in one comma-separated location item.
                 parameters.append(term if column.lower() == "locations" else f"%{escaped}%")
         return sql.SQL("(") + sql.SQL(" OR ").join(comparisons) + sql.SQL(")"), parameters
 
@@ -421,6 +428,27 @@ class DiscoveredCompaniesRepository:
         requested_location: Optional[str] = None,
     ) -> Company:
         values = {}
+        address_column = field_columns.get("address")
+        raw_address_values = row.get(address_column) if address_column else None
+        if isinstance(raw_address_values, list):
+            address_values = [
+                str(item).strip()
+                for item in raw_address_values
+                if item is not None and str(item).strip()
+            ]
+        elif isinstance(raw_address_values, str):
+            try:
+                decoded_addresses = json.loads(raw_address_values)
+            except (TypeError, json.JSONDecodeError):
+                decoded_addresses = raw_address_values
+            address_values = (
+                [str(item).strip() for item in decoded_addresses if item is not None and str(item).strip()]
+                if isinstance(decoded_addresses, list)
+                else [str(decoded_addresses).strip()]
+            )
+        else:
+            address_values = []
+
         for field, column in field_columns.items():
             raw_value = row.get(column)
             if isinstance(raw_value, list):
@@ -464,6 +492,43 @@ class DiscoveredCompaniesRepository:
             )
         else:
             location_values = []
+
+        location_resolution_issue = None
+        if requested_location:
+            address_matches = []
+            address_decisions = []
+            for address_value in address_values:
+                decision, _ = classify_location(
+                    None, None, address_value, requested_location
+                )
+                address_decisions.append(decision)
+                if decision == "match":
+                    address_matches.append(address_value)
+
+            if address_matches:
+                # Legacy rows can aggregate several branches or website
+                # addresses. Keep the address that confirms this search
+                # instead of deriving geography from the combined string.
+                values["address"] = address_matches[0]
+                address_city, address_state = parse_address_components(address_matches[0])
+                requested_city = canonical_city(requested_location)
+                values["city"] = address_city or requested_city or values.get("city")
+                values["state"] = (
+                    address_state
+                    or CITY_STATE.get(canonical_city(values.get("city")) or values.get("city"))
+                    or values.get("state")
+                )
+                values["region"] = values["state"] or values.get("region")
+            elif len(location_values) > 2 or (
+                address_decisions and all(item == "outside" for item in address_decisions)
+            ):
+                # The old multi-location shape is ambiguous unless an
+                # individual address confirms the requested place. Keep the
+                # row for diagnostics, but do not treat it as a target-city
+                # lead downstream.
+                location_resolution_issue = (
+                    f"legacy multi-location record has no address confirming '{requested_location}'"
+                )
 
         # Preserve the specifically searched locality only when that locality
         # is present in this Discovery DB row's stored location hierarchy.
@@ -518,7 +583,11 @@ class DiscoveredCompaniesRepository:
             values["state"] = parsed_state
         if not values.get("region"):
             values["region"] = parsed_state
-        return Company(**values)
+        metadata = (
+            {"_location_resolution_issue": location_resolution_issue}
+            if location_resolution_issue else {}
+        )
+        return Company(**values, source_metadata=metadata)
 
 
 class DiscoveredCompaniesSearchService:

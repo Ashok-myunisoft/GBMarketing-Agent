@@ -325,6 +325,7 @@ def classify_location(
     requested_geocoded_state: Optional[str] = None,
     requested_geocoded_district: Optional[str] = None,
     requested_geocoded_city: Optional[str] = None,
+    company_source_locations: Optional[list[str] | str] = None,
 ) -> "tuple[str, str]":
     """Generic hierarchy-aware match between a requested location and a company's.
 
@@ -433,6 +434,25 @@ def classify_location(
         if actual_district:
             if _normalize(actual_district) == _normalize(requested_district):
                 return "match", f"company district '{actual_district}' matches requested district '{requested_district}'"
+            requested_city = canonical_city(requested)
+            actual_city = canonical_city(company_city)
+            conflicting_city = actual_city and requested_city and actual_city != requested_city
+            conflicting_state = _state_conflict(company_state, company_address, requested_state_hint)
+            if requested_city and not canonical_district(company_district) and not conflicting_city and not conflicting_state:
+                if actual_city == requested_city:
+                    return "match", f"company city '{company_city}' matches requested city '{requested_city}'"
+                source_locations = (
+                    [company_source_locations]
+                    if isinstance(company_source_locations, str)
+                    else company_source_locations or []
+                )
+                source_cities = {
+                    city
+                    for item in source_locations
+                    if (city := canonical_city(item))
+                }
+                if source_cities == {requested_city}:
+                    return "match", f"source location hierarchy confirms requested city '{requested_city}'"
             return "outside", f"resolved district '{actual_district}' does not match requested district '{requested_district}'"
         conflicting_state = _state_conflict(company_state, company_address, requested_state_hint)
         if conflicting_state:

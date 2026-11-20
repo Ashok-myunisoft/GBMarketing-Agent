@@ -1,14 +1,19 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { createJob, deleteExistingData, exportUrl, getExistingData, getHourlyCompanyStats, getJob, getJobEvents, getJobs, uploadExistingData } from "./api";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createJob, deleteExistingData, exportUrl, getCRMImportPreview, getExistingData, getHourlyCompanyStats, getJob, getJobCounts, getJobEvents, getJobs, getSavedLeadCount, hasCRMSession, loginToCRM, logoutOfCRM, uploadExistingData, uploadFileToCRM, uploadJobRowsToCRM } from "./api";
 import type { ExistingDataFile } from "./api";
 import { getMauticContactActivity, getMauticDashboard, mauticConnectUrl, syncJobToMautic } from "./services/mauticService";
-import type { Company, Job, JobEvent, MauticActivityEvent, MauticContact, MauticPagination, MauticSummary, MauticSyncResult, PipelineStats } from "./types";
+import type { CRMImportColumn, CRMImportRow, CRMUploadResult, Company, Job, JobEvent, MauticActivityEvent, MauticContact, MauticPagination, MauticSummary, MauticSyncResult, PipelineStats } from "./types";
 
-type Page = "Dashboard" | "Lead Search" | "Search History" | "Leads" | "Companies" | "Mautic" | "Existing Data" | "Exports" | "Settings";
-const pages: Page[] = ["Dashboard", "Lead Search", "Search History", "Leads", "Companies", "Mautic", "Existing Data", "Exports", "Settings"];
+type Page = "Dashboard" | "Lead Search" | "Search History" | "Leads" | "Companies" | "GoodBooks CRM" | "Mautic" | "Existing Data" | "Exports" | "Settings";
+const pages: Page[] = ["Dashboard", "Lead Search", "Search History", "Leads", "Companies", "GoodBooks CRM", "Mautic", "Existing Data", "Exports", "Settings"];
 const steps = ["search", "enrichment", "validation", "contact", "export"];
 
 export default function App() {
+  const [authenticated, setAuthenticated] = useState(hasCRMSession());
+  const [crmUserName, setCrmUserName] = useState("");
+  const [incharge, setIncharge] = useState("");
+  const [allotedTo, setAllotedTo] = useState("");
+  const [showAssignment, setShowAssignment] = useState(false);
   const [page, setPage] = useState<Page>("Dashboard");
   const [query, setQuery] = useState("Find 50 valve manufacturers in Chennai and identify their Managing Director");
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -41,7 +46,7 @@ export default function App() {
     if (!query.trim()) return;
     setError(null);
     try {
-      const job = await createJob(query.trim());
+      const job = await createJob(query.trim(), incharge.trim(), allotedTo.trim());
       setSelectedJob(job); setEvents([]); setJobs((current) => [job, ...current]); setPage("Lead Search");
     } catch (err) { setError(messageOf(err)); }
   }
@@ -54,24 +59,33 @@ export default function App() {
   }), [companies, filter]);
   const completed = jobs.filter((job) => job.status === "completed");
 
+  if (!authenticated) return <div className="crm-entry">
+    <div className="crm-entry-brand">
+      <div className="logo"><span>GB</span> Marketing Agent</div>
+      <div className="crm-entry-brand-copy"><h1>Lead search and CRM, together.</h1><p>Sign in with GoodBooks to access your marketing workspace.</p></div>
+    </div>
+    <div className="crm-entry-form"><CRMLoginPage onConnected={(name) => { setCrmUserName(name); setIncharge(name); setAllotedTo(name); setAuthenticated(true); }} /></div>
+  </div>;
+
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="logo"><span>GB</span> Marketing Agent</div>
       <p className="workspace-label">WORKSPACE</p>
       <nav>{pages.map((item) => <button key={item} className={page === item ? "nav-item active" : "nav-item"} onClick={() => setPage(item)}>{iconFor(item)}<span>{item}</span></button>)}</nav>
-      <div className="sidebar-footer"><span className="online-dot" /> API workspace ready</div>
+      <div className="sidebar-footer"><div className="crm-signed-in">Signed in as <strong>{crmUserName}</strong></div><button className="sidebar-disconnect" onClick={() => void logoutOfCRM().then(() => { setCrmUserName(""); setIncharge(""); setAllotedTo(""); setAuthenticated(false); }).catch((err) => setError(messageOf(err)))}>Disconnect</button><span className="online-dot" /> API workspace ready</div>
     </aside>
 
     <main className="main-workspace">
       <header className="main-header"><div><p className="eyebrow">{page}</p><h1>{headingFor(page)}</h1></div><button className="secondary" onClick={() => void refreshJobs()}>Refresh</button></header>
       {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError(null)}>×</button></div>}
 
-      {page === "Dashboard" && <Dashboard jobs={jobs} completed={completed.length} onSelect={(job) => { setSelectedJob(job); void refreshSelected(job.id); setPage("Lead Search"); }} />}
-      {page === "Lead Search" && <LeadSearch query={query} setQuery={setQuery} onSubmit={submit} job={selectedJob} events={events} />}
+      {page === "Dashboard" && <Dashboard jobs={jobs} onSelect={(job) => { setSelectedJob(job); void refreshSelected(job.id); setPage("Lead Search"); }} />}
+      {page === "Lead Search" && <LeadSearch query={query} setQuery={setQuery} onSubmit={submit} job={selectedJob} events={events} incharge={incharge} setIncharge={setIncharge} allotedTo={allotedTo} setAllotedTo={setAllotedTo} showAssignment={showAssignment} setShowAssignment={setShowAssignment} />}
       {page === "Search History" && <History jobs={jobs} onSelect={(job) => { setSelectedJob(job); void refreshSelected(job.id); setPage("Lead Search"); }} />}
       {page === "Leads" && <LeadTable companies={visibleCompanies} filter={filter} setFilter={setFilter} />}
       {page === "Companies" && <CompanyDirectory companies={companies} />}
       {page === "Mautic" && <MauticPage />}
+      {page === "GoodBooks CRM" && <CRMLoginPage displayName={crmUserName} />}
       {page === "Existing Data" && <ExistingData onError={setError} />}
       {page === "Exports" && <Exports jobs={completed} />}
       {page === "Settings" && <Settings />}
@@ -79,13 +93,40 @@ export default function App() {
   </div>;
 }
 
-function Dashboard({ jobs, completed, onSelect }: { jobs: Job[]; completed: number; onSelect: (job: Job) => void }) {
+function Dashboard({ jobs, onSelect }: { jobs: Job[]; onSelect: (job: Job) => void }) {
   const latest = jobs.slice(0, 5);
-  const leadCount = jobs.reduce((total, job) => total + job.lead_count, 0);
+  const [jobCounts, setJobCounts] = useState<{ total_jobs: number; completed_runs: number } | null>(null);
+  const [jobCountsFailed, setJobCountsFailed] = useState(false);
+  const [savedLeadCount, setSavedLeadCount] = useState<number | null>(null);
+  const [savedLeadCountFailed, setSavedLeadCountFailed] = useState(false);
   const [mauticTotal, setMauticTotal] = useState<number | null>(null);
   const [mauticFailed, setMauticFailed] = useState(false);
   const [hourlyCompanyCount, setHourlyCompanyCount] = useState<number | null>(null);
   const [hourlyCompanyFailed, setHourlyCompanyFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshJobCounts = () => {
+      getJobCounts()
+        .then((counts) => { if (!cancelled) { setJobCounts(counts); setJobCountsFailed(false); } })
+        .catch(() => { if (!cancelled) setJobCountsFailed(true); });
+    };
+    refreshJobCounts();
+    const timer = window.setInterval(refreshJobCounts, 30_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [jobs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshSavedLeads = () => {
+      getSavedLeadCount()
+        .then(({ count }) => { if (!cancelled) { setSavedLeadCount(count); setSavedLeadCountFailed(false); } })
+        .catch(() => { if (!cancelled) setSavedLeadCountFailed(true); });
+    };
+    refreshSavedLeads();
+    const timer = window.setInterval(refreshSavedLeads, 30_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,7 +161,7 @@ function Dashboard({ jobs, completed, onSelect }: { jobs: Job[]; completed: numb
   const mauticValue = mauticFailed ? "—" : mauticTotal === null ? "…" : mauticTotal.toLocaleString();
   const hourlyCompanyValue = hourlyCompanyFailed ? "N/A" : hourlyCompanyCount === null ? "Loading" : hourlyCompanyCount.toLocaleString();
 
-  return <><section className="stats"><Stat label="Total jobs" value={jobs.length} /><Stat label="Completed runs" value={completed} /><Stat label="Leads saved" value={leadCount} /><Stat label="Running now" value={jobs.filter((job) => job.status === "running").length} /><Stat label="Total companies" value={hourlyCompanyValue} /><Stat label="Mautic Contacts" value={mauticValue} /></section>
+  return <><section className="stats"><Stat label="Total jobs" value={jobCountsFailed ? "N/A" : jobCounts === null ? "Loading" : jobCounts.total_jobs.toLocaleString()} /><Stat label="Completed runs" value={jobCountsFailed ? "N/A" : jobCounts === null ? "Loading" : jobCounts.completed_runs.toLocaleString()} /><Stat label="Leads saved" value={savedLeadCountFailed ? "N/A" : savedLeadCount === null ? "Loading" : savedLeadCount.toLocaleString()} /><Stat label="Running now" value={jobs.filter((job) => job.status === "running").length} /><Stat label="Total companies" value={hourlyCompanyValue} /><Stat label="Mautic Contacts" value={mauticValue} /></section>
     <section className="panel"><div className="panel-title"><div><h2>Recent searches</h2><p>Open a job to review its workflow and results.</p></div></div><History jobs={latest} onSelect={onSelect} compact /></section></>;
 }
 
@@ -165,12 +206,109 @@ function firstNumericValue(record: Record<string, unknown>, keys: string[]): num
   return null;
 }
 
-function LeadSearch({ query, setQuery, onSubmit, job, events }: { query: string; setQuery: (value: string) => void; onSubmit: (event: FormEvent) => void; job: Job | null; events: JobEvent[] }) {
-  return <><form className="search-panel" onSubmit={onSubmit}><label htmlFor="query">Describe the companies you need</label><div><input id="query" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find pump manufacturers in Coimbatore" /><button className="primary" type="submit">Start lead search</button></div><p>Example: “Find 50 textile manufacturers in Coimbatore and identify their Managing Director.”</p></form>
+function LeadSearch({ query, setQuery, onSubmit, job, events, incharge, setIncharge, allotedTo, setAllotedTo, showAssignment, setShowAssignment }: { query: string; setQuery: (value: string) => void; onSubmit: (event: FormEvent) => void; job: Job | null; events: JobEvent[]; incharge: string; setIncharge: (value: string) => void; allotedTo: string; setAllotedTo: (value: string) => void; showAssignment: boolean; setShowAssignment: (value: boolean) => void }) {
+  return <><form className="search-panel" onSubmit={onSubmit}><label htmlFor="query">Describe the companies you need</label><div><input id="query" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find pump manufacturers in Coimbatore" /><button className="primary" type="submit">Start lead search</button></div><div className="assignment-summary"><span>Incharge: <strong>{incharge || "None"}</strong> · Alloted To: <strong>{allotedTo || "None"}</strong></span><button className="secondary" type="button" onClick={() => setShowAssignment(!showAssignment)}>{showAssignment ? "Done" : "Assign leads"}</button></div>{showAssignment && <div className="assignment-fields"><label htmlFor="lead-incharge">Incharge<input id="lead-incharge" value={incharge} onChange={(event) => setIncharge(event.target.value)} maxLength={300} /></label><label htmlFor="lead-alloted-to">Alloted To<input id="lead-alloted-to" value={allotedTo} onChange={(event) => setAllotedTo(event.target.value)} maxLength={300} /></label></div>}<p>Example: “Find 50 textile manufacturers in Coimbatore and identify their Managing Director.”</p></form>
     {!job && <section className="empty-state"><h2>Your workflow will appear here</h2><p>Start a search to see real-time progress, events, and lead results.</p></section>}
     {job && <section className="job-grid"><div className="panel"><div className="panel-title"><div><p className="eyebrow">Current workflow</p><h2>{job.query}</h2></div><Status status={job.status} /></div><Workflow status={job.status} currentStep={job.current_step} /><p className="job-meta">Created {formatDate(job.created_at)} · {job.lead_count} leads available</p></div><LiveLogs events={events} /></section>}
-    {job?.result && <section className="panel results-preview"><div className="panel-title"><div><p className="eyebrow">Results</p><h2>{job.result.industry || "Lead"} companies {job.result.location ? `in ${job.result.location}` : ""}</h2>{job.result.validation_stats && <p className="job-meta">{job.result.validation_stats.new} new · {job.result.validation_stats.duplicates} already in export · {job.result.validation_stats.rejected} rejected</p>}</div><div className="results-actions"><MauticSyncButton job={job} /><a className="download" href={exportUrl(job.id)}>Download Excel</a></div></div>{job.result.pipeline_stats && <PipelineFunnel stats={job.result.pipeline_stats} />}<LeadTable companies={job.result.companies.slice(0, 10)} filter="all" setFilter={() => undefined} preview /></section>}
+    {job?.result && <section className="panel results-preview"><div className="panel-title"><div><p className="eyebrow">Results</p><h2>{job.result.industry || "Lead"} companies {job.result.location ? `in ${job.result.location}` : ""}</h2>{job.result.validation_stats && <p className="job-meta">{job.result.validation_stats.new} new · {job.result.validation_stats.duplicates} already in export · {job.result.validation_stats.rejected} rejected</p>}</div><div className="results-actions"><CRMUploadActions job={job} /><MauticSyncButton job={job} /><a className="download" href={exportUrl(job.id)}>Download Excel</a></div></div>{job.result.pipeline_stats && <PipelineFunnel stats={job.result.pipeline_stats} />}<LeadTable companies={job.result.companies.slice(0, 10)} filter="all" setFilter={() => undefined} preview /></section>}
     {job?.result?.pipeline_stats && <RemovedLeads stats={job.result.pipeline_stats} />}</>;
+}
+
+function CRMLoginPage({ displayName = "", onConnected }: { displayName?: string; onConnected?: (name: string) => void }) {
+  const [connected, setConnected] = useState(hasCRMSession());
+  const [userCode, setUserCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [connectionName, setConnectionName] = useState("");
+  const [userName, setUserName] = useState(displayName);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function connect(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError(null);
+    try {
+      const result = await loginToCRM(userCode, password, connectionName);
+      setConnected(true); setUserName(`${result.user_name} (${result.database_name})`); setPassword("");
+      onConnected?.(result.user_name);
+    } catch (err) { setError(messageOf(err)); }
+    finally { setBusy(false); }
+  }
+
+  return <section className="panel crm-login-page"><p className="eyebrow">GoodBooks CRM</p><h2>{connected ? "Connection" : "Sign in"}</h2>
+    {connected ? <p>Connected {userName}</p>
+      : <form className="crm-login" onSubmit={(event) => void connect(event)}>
+        <label htmlFor="crm-user-code">User code</label>
+        <input id="crm-user-code" autoComplete="username" value={userCode} onChange={(event) => setUserCode(event.target.value)} required />
+        <label htmlFor="crm-password">Password</label>
+        <input id="crm-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+        <label htmlFor="crm-database">Database name</label>
+        <input id="crm-database" autoComplete="off" value={connectionName} onChange={(event) => setConnectionName(event.target.value)} required />
+        <button className="primary" type="submit" disabled={busy}>{busy ? "Connecting…" : "Sign in"}</button>
+      </form>}
+    {error && <div className="error-banner" role="alert">{error}</div>}
+  </section>;
+}
+
+function CRMUploadActions({ job }: { job: Job }) {
+  const [rows, setRows] = useState<CRMImportRow[] | null>(null);
+  const [columns, setColumns] = useState<CRMImportColumn[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [crmResult, setCrmResult] = useState<CRMUploadResult | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  async function openReview() {
+    setBusy(true); setError(null); setMessage(null); setCrmResult(null);
+    try {
+      const preview = await getCRMImportPreview(job.id);
+      setColumns(preview.columns);
+      setRows(preview.rows);
+    }
+    catch (err) { setError(messageOf(err)); }
+    finally { setBusy(false); }
+  }
+  function updateRow(index: number, change: Partial<CRMImportRow>) {
+    setRows((current) => current?.map((row, rowIndex) => rowIndex === index ? { ...row, ...change } : row) ?? null);
+  }
+  async function uploadReviewed() {
+    if (!rows?.some((row) => row.approved)) { setError("Select at least one lead to upload."); return; }
+    setBusy(true); setError(null); setMessage(null); setCrmResult(null);
+    try {
+      const result = await uploadJobRowsToCRM(job.id, rows);
+      setCrmResult(result);
+      setMessage(`Accepted by CRM (HTTP ${result.crm_status_code}) for ${result.uploaded_count} lead${result.uploaded_count === 1 ? "" : "s"}. Import status is unconfirmed. Upload ID: ${result.upload_id}`);
+      setRows(null);
+    } catch (err) { setError(messageOf(err)); }
+    finally { setBusy(false); }
+  }
+  async function uploadManual(file?: File) {
+    if (!file) return;
+    if (!/\.xlsx$/i.test(file.name)) { setError("Choose an .xlsx file."); return; }
+    if (!window.confirm(`Upload ${file.name} directly to GoodBooks CRM?`)) return;
+    setBusy(true); setError(null); setMessage(null); setCrmResult(null);
+    try {
+      const result = await uploadFileToCRM(file);
+      setCrmResult(result);
+      setMessage(`Accepted by CRM (HTTP ${result.crm_status_code}) for ${result.file_name}. Import status is unconfirmed. Upload ID: ${result.upload_id}`);
+    } catch (err) { setError(messageOf(err)); }
+    finally { setBusy(false); if (fileInput.current) fileInput.current.value = ""; }
+  }
+  return <>
+    <button className="primary" disabled={busy} onClick={() => void openReview()}>{busy ? "Working…" : "Review & Upload to CRM"}</button>
+    <button className="secondary" disabled={busy} onClick={() => fileInput.current?.click()}>Manual Excel Upload</button>
+    <input ref={(node) => { fileInput.current = node; }} className="hidden-file-input" type="file" accept=".xlsx" onChange={(event) => void uploadManual(event.target.files?.[0])} />
+    {message && <span className="crm-upload-message" role="status">{message}</span>}
+    {crmResult && <details className="crm-response"><summary>CRM response</summary><pre>{JSON.stringify(crmResult.crm_response, null, 2)}</pre></details>}
+    {error && <span className="mautic-sync-error" role="alert">{error}</span>}
+    {rows && <div className="modal-overlay" onClick={() => !busy && setRows(null)}>
+      <section className="panel modal crm-review-modal" role="dialog" aria-modal="true" aria-label="Review leads for CRM" onClick={(event) => event.stopPropagation()}>
+        <div className="panel-title"><div><p className="eyebrow">GoodBooks CRM</p><h2>Review current search leads</h2><p>{rows.length} rows from this search. Edit values or uncheck leads before upload.</p></div><button className="secondary" disabled={busy} onClick={() => setRows(null)}>Close</button></div>
+        <div className="crm-review-table"><table><thead><tr><th>Include</th>{columns.map((column, index) => <th key={index}>{column.header}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={row.source_index}><td><input aria-label={`Include ${row.lead_name}`} type="checkbox" checked={row.approved} onChange={(event) => updateRow(index, { approved: event.target.checked })} /></td>{columns.map((column, columnIndex) => <td key={columnIndex}>{column.key ? <input aria-label={column.header} value={row[column.key]} onChange={(event) => updateRow(index, { [column.key!]: event.target.value })} /> : <span className="crm-review-fixed">{column.static_value}</span>}</td>)}</tr>)}</tbody></table></div>
+        {error && <div className="error-banner" role="alert">{error}</div>}
+        <div className="crm-review-footer"><span>{rows.filter((row) => row.approved).length} selected</span><button className="primary" disabled={busy || !rows.some((row) => row.approved)} onClick={() => void uploadReviewed()}>{busy ? "Uploading…" : "Upload selected to CRM"}</button></div>
+      </section>
+    </div>}
+  </>;
 }
 
 function MauticSyncButton({ job }: { job: Job }) {
@@ -406,7 +544,7 @@ function LiveLogs({ events }: { events: JobEvent[] }) { return <section classNam
 function Stat({ label, value }: { label: string; value: number | string }) { return <article className="stat"><span>{label}</span><strong>{value}</strong></article>; }
 function Status({ status }: { status: string }) { return <span className={`status ${status}`}>{status.replace("_", " ")}</span>; }
 function headingFor(page: Page) { return page === "Lead Search" ? "Generate qualified leads" : page; }
-function iconFor(page: Page) { return ({ Dashboard: "⌂", "Lead Search": "⌕", "Search History": "◷", Leads: "◫", Companies: "▦", Mautic: "✉", "Existing Data": "▤", Exports: "⇩", Settings: "⚙" } as Record<Page, string>)[page]; }
+function iconFor(page: Page) { return ({ Dashboard: "⌂", "Lead Search": "⌕", "Search History": "◷", Leads: "◫", Companies: "▦", "GoodBooks CRM": "◈", Mautic: "✉", "Existing Data": "▤", Exports: "⇩", Settings: "⚙" } as Record<Page, string>)[page]; }
 function formatDate(value: string) { return new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); }
 function formatFileSize(bytes: number) { return bytes < 1024 * 1024 ? `${Math.max(1, Math.ceil(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : "Something went wrong."; }

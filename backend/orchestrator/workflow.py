@@ -272,14 +272,29 @@ class WorkflowOrchestrator:
                 if company.source_table != "public.discovered_companies" or not context.location:
                     enrichment_batch.append(company)
                     continue
-                decision, reason = classify_location(
-                    company.city,
-                    company.state,
-                    company.address,
-                    context.location,
-                    company_district=company.district,
-                    company_locality=company.locality,
+                location_issue = (company.source_metadata or {}).get(
+                    "_location_resolution_issue"
                 )
+                if location_issue:
+                    decision, reason = "outside", str(location_issue)
+                    rejection_stage = "search_filter"
+                    rejection_metric = "rejected"
+                    rejection_message = reason
+                else:
+                    decision, reason = classify_location(
+                        company.city,
+                        company.state,
+                        company.address,
+                        context.location,
+                        company_district=company.district,
+                        company_locality=company.locality,
+                        company_source_locations=(company.source_metadata or {}).get("_source_locations"),
+                    )
+                    rejection_stage = "validation"
+                    rejection_metric = "out_of_area"
+                    rejection_message = (
+                        f"located outside requested area '{context.location}' ({reason})"
+                    )
                 if decision != "outside":
                     enrichment_batch.append(company)
                     continue
@@ -297,13 +312,13 @@ class WorkflowOrchestrator:
                     reason,
                 )
                 aggregate_validation_stats["scanned"] += 1
-                aggregate_validation_stats["out_of_area"] += 1
+                aggregate_validation_stats[rejection_metric] += 1
                 processed_for_validation += 1
                 if context.pipeline_stats:
                     context.pipeline_stats.removed.append(RemovedCompany(
                         company_name=company.company_name or "(unnamed)",
-                        stage="validation",
-                        reason=f"located outside requested area '{context.location}' ({reason})",
+                        stage=rejection_stage,
+                        reason=rejection_message,
                         source_table=company.source_table,
                         source_row_id=company.source_row_id,
                     ))

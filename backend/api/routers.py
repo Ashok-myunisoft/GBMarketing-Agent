@@ -1,33 +1,75 @@
 import tempfile
+import uuid
+import logging
 from pathlib import Path
 from typing import Optional
 import httpx
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field
 from fastapi.responses import Response, RedirectResponse
 
 from schemas.request import ChatRequest
+from schemas.crm_import import CRMImportRowsRequest
+from schemas.company import Company
 from agents.conversation_agent import ConversationAgent
 from agents.export_agent import ExportAgent
 from core.config import settings
 from services.llm_services import LLMTemporarilyUnavailableError
 from services.job_service import JobService
 from services.existing_data_service import ExistingDataService
-from services.mlead.repository import MleadRepository
 from services.mautic.client import MauticClient, MauticError
 # Mautic OAuth service
 from services.mautic.oauth_service import MauticOAuthService
 from services.mautic.mautic_dashboard import MauticDashboardService
 from services.mautic.outreach_service import MauticOutreachService, MauticOutreachError
+from services.crm.bulk_import_service import CRMImportError, CRMImportService
+from services.crm.auth_service import authenticate, login_for_session, logout
+from services.mlead.repository import MleadRepository
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+class CRMLoginRequest(BaseModel):
+    user_code: str
+    password: str
+    connection_name: str
+
+
+class CreateJobRequest(ChatRequest):
+    incharge: str = Field(default="", max_length=300)
+    alloted_to: str = Field(default="", max_length=300)
+
+
+@router.post('/crm/login')
+async def crm_login(request: CRMLoginRequest):
+    try:
+        return await authenticate(request.user_code, request.password, request.connection_name)
+    except CRMImportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post('/crm/logout')
+def crm_logout(x_crm_session: Optional[str] = Header(default=None)):
+    logout(x_crm_session)
+    return {'ok': True}
 
 COMPANY_HOURLY_STATS_URL = "http://217.217.249.121:8041/stats/companies/hourly"
 
 job_service = JobService()
 existing_data_service = ExistingDataService()
 mlead_repository = MleadRepository()
+
+
+@router.get('/stats/leads/saved')
+def get_saved_lead_count():
+    try:
+        return {'count': mlead_repository.count_leads()}
+    except Exception as exc:
+        logger.exception('Unable to count persisted leads')
+        raise HTTPException(status_code=503, detail='Unable to load saved lead count.') from exc
 
 
 @router.get("/stats/companies/hourly")
@@ -48,6 +90,7 @@ mautic_oauth_service = MauticOAuthService()
 mautic_client = MauticClient()
 mautic_dashboard_service = MauticDashboardService(mautic_client)
 mautic_outreach_service = MauticOutreachService(mautic_client, job_service.store)
+crm_import_service = CRMImportService(job_service.store)
 
 # ============================================================
 # EXISTING MARKETING AGENT ROUTES
@@ -69,14 +112,19 @@ def chat(request: ChatRequest):
 
 
 @router.post("/jobs", status_code=202)
-def create_job(request: ChatRequest):
+def create_job(request: CreateJobRequest):
     """Starts the existing workflow in the background for the React UI."""
-    return job_service.create(request.message)
+    return job_service.create(request.message, request.incharge.strip(), request.alloted_to.strip())
 
 
 @router.get("/jobs")
 def list_jobs(limit: int = Query(default=50, ge=1, le=200)):
     return job_service.store.list_jobs(limit)
+
+
+@router.get("/stats/jobs")
+def get_job_counts():
+    return job_service.store.job_counts()
 
 
 @router.get("/jobs/{job_id}")
@@ -205,7 +253,7 @@ def get_lead(lead_id: str):
 
 @router.get("/jobs/{job_id}/export")
 def download_export(job_id: str):
-    """Downloads the COMPLETE current public."TLead" dataset as XLSX."""
+    """Downloads only the leads produced by this completed search job."""
 
     job = job_service.store.get(job_id)
 
@@ -221,14 +269,10 @@ def download_export(job_id: str):
             detail="Export is not available yet"
         )
 
-    try:
-        companies = mlead_repository.get_all_leads()
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Unable to read leads from the database"
-        ) from exc
+    companies = [
+        Company.model_validate(company)
+        for company in (job.get("result") or {}).get("companies", [])
+    ]
 
     with tempfile.TemporaryDirectory() as tmp_dir:
 
@@ -236,7 +280,11 @@ def download_export(job_id: str):
 
         ExportAgent().execute(
             companies,
-            output_path=str(output_path)
+            output_path=str(output_path),
+            column_overrides={
+                "Incharge": job.get("incharge") or "None",
+                "Alloted To": job.get("alloted_to") or "None",
+            },
         )
 
         content = output_path.read_bytes()
@@ -252,6 +300,82 @@ def download_export(job_id: str):
                 f'attachment; filename="leads_{job_id}.xlsx"'
         },
     )
+
+
+@router.get("/jobs/{job_id}/crm-import-preview")
+def crm_import_preview(job_id: str):
+    try:
+        return {
+            "rows": crm_import_service.preview_job(job_id),
+            "columns": crm_import_service.preview_columns(),
+        }
+    except CRMImportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post("/jobs/{job_id}/crm-upload")
+async def upload_job_to_crm(job_id: str, request: CRMImportRowsRequest, x_crm_session: Optional[str] = Header(default=None)):
+    try:
+        login_dto = login_for_session(x_crm_session)
+    except CRMImportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    upload_id = uuid.uuid4().hex
+    approved_count = sum(1 for row in request.rows if row.approved)
+    job_service.store.begin_crm_upload(
+        upload_id, job_id=job_id, source_type="search_job",
+        file_name="LeadImport_template.xlsx", item_count=approved_count,
+    )
+    try:
+        result = await crm_import_service.upload_job_rows(job_id, request.rows, login_dto)
+        job_service.store.finish_crm_upload(upload_id, status="completed", response=result)
+        return {"upload_id": upload_id, **result}
+    except CRMImportError as exc:
+        logger.warning('CRM upload failed upload_id=%s job_id=%s reason=%s', upload_id, job_id, exc)
+        job_service.store.finish_crm_upload(upload_id, status="failed", error=str(exc))
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception('CRM upload failed unexpectedly upload_id=%s job_id=%s', upload_id, job_id)
+        job_service.store.finish_crm_upload(upload_id, status="failed", error="CRM upload failed.")
+        raise HTTPException(status_code=500, detail="CRM upload failed.") from exc
+
+
+@router.post("/crm/upload-file")
+async def upload_manual_file_to_crm(file: UploadFile = File(...), x_crm_session: Optional[str] = Header(default=None)):
+    try:
+        login_dto = login_for_session(x_crm_session)
+    except CRMImportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    file_name = Path(file.filename or "upload.xlsx").name
+    upload_id = uuid.uuid4().hex
+    job_service.store.begin_crm_upload(
+        upload_id, job_id=None, source_type="manual_file", file_name=file_name,
+        item_count=0,
+    )
+    try:
+        content = await file.read(20 * 1024 * 1024 + 1)
+        if len(content) > 20 * 1024 * 1024:
+            raise CRMImportError("Excel uploads must be 20 MB or smaller.", 413)
+        result = await crm_import_service.upload_manual_file(file_name, content, login_dto)
+        job_service.store.finish_crm_upload(upload_id, status="completed", response=result)
+        return {"upload_id": upload_id, **result}
+    except CRMImportError as exc:
+        logger.warning('CRM manual upload failed upload_id=%s reason=%s', upload_id, exc)
+        job_service.store.finish_crm_upload(upload_id, status="failed", error=str(exc))
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception('CRM manual upload failed unexpectedly upload_id=%s', upload_id)
+        job_service.store.finish_crm_upload(upload_id, status="failed", error="CRM upload failed.")
+        raise HTTPException(status_code=500, detail="CRM upload failed.") from exc
+    finally:
+        await file.close()
+
+
+@router.get("/crm/uploads")
+def crm_upload_history(
+    job_id: Optional[str] = None,
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    return job_service.store.crm_upload_history(job_id=job_id, limit=limit)
 
 
 @router.get("/existing-data")

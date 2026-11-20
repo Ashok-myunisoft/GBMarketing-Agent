@@ -75,6 +75,13 @@ class MleadRepository:
     # ------------------------------------------------------------------
     # read
     # ------------------------------------------------------------------
+    def count_leads(self) -> int:
+        """Count leads persisted in the configured PostgreSQL database."""
+        with closing(self._connect()) as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT COUNT(*) FROM public."TLead"')
+                return int(cur.fetchone()[0])
+
     def fetch_all(self) -> list[dict[str, Any]]:
         """Return every existing lead's fields relevant to dedup/mapping.
 

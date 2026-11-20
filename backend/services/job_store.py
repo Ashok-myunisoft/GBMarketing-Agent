@@ -40,7 +40,9 @@ class JobStore:
                     completed_at TEXT,
                     error TEXT,
                     result_json TEXT,
-                    export_path TEXT
+                    export_path TEXT,
+                    incharge TEXT NOT NULL DEFAULT '',
+                    alloted_to TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS job_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,8 +53,24 @@ class JobStore:
                     message TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
                 );
+                CREATE TABLE IF NOT EXISTS crm_uploads (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT,
+                    source_type TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    item_count INTEGER NOT NULL DEFAULT 0,
+                    response_json TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+            for name in ("incharge", "alloted_to"):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _now() -> str:
@@ -87,13 +105,13 @@ class JobStore:
                 )
                 self._add_event(connection, row["id"], None, "failed", error)
 
-    def create(self, query: str) -> dict[str, Any]:
+    def create(self, query: str, incharge: str = "", alloted_to: str = "") -> dict[str, Any]:
         job_id = uuid.uuid4().hex
         created_at = self._now()
         with self._lock, closing(self._connect()) as connection:
             connection.execute(
-                "INSERT INTO jobs (id, query, status, created_at) VALUES (?, ?, ?, ?)",
-                (job_id, query, "queued", created_at),
+                "INSERT INTO jobs (id, query, status, created_at, incharge, alloted_to) VALUES (?, ?, ?, ?, ?, ?)",
+                (job_id, query, "queued", created_at, incharge, alloted_to),
             )
             self._add_event(connection, job_id, None, "queued", "Lead-generation job queued")
         return self.get(job_id) or {}
@@ -145,6 +163,16 @@ class JobStore:
             ).fetchall()
         return [self._job_from_row(row) for row in rows]
 
+    def job_counts(self) -> dict[str, int]:
+        """Count all stored jobs, independently of the recent-jobs limit."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total_jobs, "
+                "COUNT(CASE WHEN status = 'completed' THEN 1 END) AS completed_runs "
+                "FROM jobs"
+            ).fetchone()
+        return {"total_jobs": row["total_jobs"], "completed_runs": row["completed_runs"]}
+
     def events(self, job_id: str) -> list[dict[str, Any]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -152,6 +180,70 @@ class JobStore:
                 (job_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def begin_crm_upload(
+        self,
+        upload_id: str,
+        *,
+        job_id: Optional[str],
+        source_type: str,
+        file_name: str,
+        item_count: int,
+    ) -> None:
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                """INSERT INTO crm_uploads
+                   (id, job_id, source_type, file_name, status, item_count, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    upload_id, job_id, source_type, file_name, "running",
+                    item_count, self._now(),
+                ),
+            )
+
+    def finish_crm_upload(
+        self,
+        upload_id: str,
+        *,
+        status: str,
+        response: Optional[dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                """UPDATE crm_uploads
+                   SET status = ?, response_json = ?, error = ?, completed_at = ?
+                   WHERE id = ?""",
+                (
+                    status,
+                    json.dumps(response, ensure_ascii=False) if response is not None else None,
+                    error,
+                    self._now(),
+                    upload_id,
+                ),
+            )
+
+    def crm_upload_history(
+        self, *, job_id: Optional[str] = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            if job_id:
+                rows = connection.execute(
+                    """SELECT * FROM crm_uploads WHERE job_id = ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (job_id, max(1, min(limit, 200))),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM crm_uploads ORDER BY created_at DESC LIMIT ?",
+                    (max(1, min(limit, 200)),),
+                ).fetchall()
+        uploads = []
+        for row in rows:
+            upload = dict(row)
+            upload["response"] = json.loads(upload.pop("response_json") or "null")
+            uploads.append(upload)
+        return uploads
 
     @staticmethod
     def _add_event(

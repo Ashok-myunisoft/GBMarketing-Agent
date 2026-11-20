@@ -15,8 +15,8 @@ class JobService:
     def __init__(self, store: JobStore | None = None):
         self.store = store or JobStore()
 
-    def create(self, query: str) -> dict[str, Any]:
-        job = self.store.create(query)
+    def create(self, query: str, incharge: str = "", alloted_to: str = "") -> dict[str, Any]:
+        job = self.store.create(query, incharge=incharge, alloted_to=alloted_to)
         thread = threading.Thread(target=self._run, args=(job["id"], query), daemon=True)
         thread.start()
         return job

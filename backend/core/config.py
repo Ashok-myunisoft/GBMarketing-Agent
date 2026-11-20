@@ -196,5 +196,15 @@ class Settings:
         os.getenv("MAUTIC_OUTREACH_CAMPAIGN_ID", "135")
     )
 
+    # GoodBooks CRM authentication and bulk import settings.
+    ERP_LOGIN_URL = os.getenv("ERP_LOGIN_URL", "https://api-live.goodbookserp.in")
+    ERP_AUTH_PATH = os.getenv("ERP_AUTH_PATH", "/fws/Authentication/AuthenticateUserNative")
+    CRM_IMPORT_PATH = os.getenv("CRM_IMPORT_PATH", "/ads/Bulk/Import")
+    CRM_IMPORT_FILE_TYPE = int(os.getenv("CRM_IMPORT_FILE_TYPE", "0"))
+    CRM_BULK_ICE_ID = int(os.getenv("CRM_BULK_ICE_ID", "-1499999991"))
+    CRM_REQUEST_TIMEOUT_SECONDS = max(
+        5, int(os.getenv("CRM_REQUEST_TIMEOUT_SECONDS", "60"))
+    )
+
 
 settings = Settings()

@@ -81,7 +81,43 @@ export type Job = {
   error: string | null;
   export_path: string | null;
   lead_count: number;
+  incharge: string;
+  alloted_to: string;
   result: WorkflowResult | null;
+};
+
+export type CRMImportRow = {
+  source_index: number;
+  approved: boolean;
+  company: string;
+  lead_name: string;
+  description: string;
+  contact_name: string;
+  designation: string;
+  contact_mobile_no: string;
+  contact_email: string;
+  address1: string;
+  gst: string;
+  city: string;
+  stage: string;
+  remarks: string;
+  incharge: string;
+  alloted_to: string;
+  source_detail: string;
+};
+
+export type CRMImportColumn = {
+  header: string;
+  key: Exclude<keyof CRMImportRow, "source_index" | "approved"> | null;
+  static_value: string;
+};
+
+export type CRMUploadResult = {
+  upload_id: string;
+  file_name: string;
+  uploaded_count: number | null;
+  crm_response: unknown;
+  crm_status_code: number;
 };
 
 export type MauticContact = {

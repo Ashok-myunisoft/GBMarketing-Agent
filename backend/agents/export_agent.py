@@ -1,6 +1,7 @@
 
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import Optional
 
 from agents.base_agent import BaseClass
@@ -28,7 +29,8 @@ class ExportAgent(BaseClass):
     business-provided template requires no changes to this file.
     """
 
-    def execute(self, companies: list[Company], output_path: Optional[str] = None) -> str:
+    def execute(self, companies: list[Company], output_path: Optional[str] = None,
+                column_overrides: Optional[dict[str, str]] = None) -> str:
         try:
             from openpyxl import load_workbook
         except ImportError as exc:
@@ -88,7 +90,9 @@ class ExportAgent(BaseClass):
                 sheet.cell(
                     row=start_row + row_offset,
                     column=column.index,
-                    value=self._resolve_value(column, company, extracted_on),
+                    value=(column_overrides[column.header]
+                           if column_overrides and column.header in column_overrides
+                           else self._resolve_value(column, company, extracted_on)),
                 )
 
         if not sheet.freeze_panes:
@@ -149,6 +153,14 @@ class ExportAgent(BaseClass):
         value = getattr(company, field, None)
         if field == "city":
             value = marketing_location(company)
+        if field == "phone":
+            digits = re.sub(r"\D", "", str(value or ""))
+            value = digits[-10:] if len(digits) >= 10 else None
         if value is None:
+            if field in {
+                "contact_person", "designation", "phone", "email",
+                "address", "gst", "city",
+            }:
+                return "None"
             return ""
         return "; ".join(value) if isinstance(value, list) else value
