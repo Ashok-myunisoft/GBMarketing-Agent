@@ -14,6 +14,10 @@ services:
     env_file:
       - ./.env
 
+    # Keep SQLite job history and uploaded data when this service is rebuilt.
+    volumes:
+      - marketing_backend_data:/app/data
+
     restart: unless-stopped
 
     # `default` keeps this service's existing (implicit) network attachment;
@@ -28,3 +32,6 @@ services:
 networks:
   searxng_default:
     external: true
+
+volumes:
+  marketing_backend_data:

@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { createJob, deleteExistingData, exportUrl, getCRMImportPreview, getExistingData, getHourlyCompanyStats, getJob, getJobCounts, getJobEvents, getJobs, getSavedLeadCount, hasCRMSession, loginToCRM, logoutOfCRM, uploadExistingData, uploadFileToCRM, uploadJobRowsToCRM } from "./api";
+import { createJob, deleteExistingData, exportUrl, getCRMImportPreview, getExistingData, getHourlyCompanyStats, getJob, getJobCounts, getJobEvents, getJobs, getSavedLeadCount, getStoredCRMUser, hasCRMSession, loginToCRM, logoutOfCRM, uploadExistingData, uploadFileToCRM, uploadJobRowsToCRM } from "./api";
 import type { ExistingDataFile } from "./api";
 import { getMauticContactActivity, getMauticDashboard, mauticConnectUrl, syncJobToMautic } from "./services/mauticService";
 import type { CRMImportColumn, CRMImportRow, CRMUploadResult, Company, Job, JobEvent, MauticActivityEvent, MauticContact, MauticPagination, MauticSummary, MauticSyncResult, PipelineStats } from "./types";
@@ -10,7 +10,7 @@ const steps = ["search", "enrichment", "validation", "contact", "export"];
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(hasCRMSession());
-  const [crmUserName, setCrmUserName] = useState("");
+  const [crmUserName, setCrmUserName] = useState(getStoredCRMUser());
   const [incharge, setIncharge] = useState("");
   const [allotedTo, setAllotedTo] = useState("");
   const [showAssignment, setShowAssignment] = useState(false);
