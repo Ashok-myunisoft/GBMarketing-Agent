@@ -118,7 +118,7 @@ def create_job(request: CreateJobRequest):
 
 
 @router.get("/jobs")
-def list_jobs(limit: int = Query(default=50, ge=1, le=200)):
+def list_jobs(limit: int = Query(default=200, ge=1, le=200)):
     return job_service.store.list_jobs(limit)
 
 

@@ -1,8 +1,8 @@
-"""One-time copy of a chosen jobs.sqlite3 history file into CMS PostgreSQL.
+"""Copy a chosen jobs.sqlite3 history file into CMS PostgreSQL.
 
 Run from backend/: python scripts/migrate_job_history_sqlite_to_postgres.py PATH
-The target is DATABASE_URL from the project .env. The script refuses to merge
-into a non-empty Marketing Agent PostgreSQL job table.
+The target is DATABASE_URL from the project .env. Existing PostgreSQL jobs are
+preserved; matching job/upload IDs are skipped so the same file can be retried.
 """
 
 import argparse
@@ -40,50 +40,50 @@ def main() -> int:
     try:
         with pg:
             with pg.cursor() as cursor:
-                cursor.execute("SELECT COUNT(*) FROM marketing_agent_jobs")
-                if cursor.fetchone()[0]:
-                    raise RuntimeError(
-                        "PostgreSQL already contains Marketing Agent jobs. "
-                        "Import stopped to avoid mixing histories; ask an administrator to review first."
-                    )
+                imported_job_ids = set()
                 for row in jobs:
                     cursor.execute(
                         """INSERT INTO marketing_agent_jobs
                         (id, query, status, current_step, created_at, started_at, completed_at,
                          error, result_json, export_path, incharge, alloted_to)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (id) DO NOTHING RETURNING id""",
                         tuple(dict(row).get(key, "") if key in ("incharge", "alloted_to") else row[key] for key in (
                             "id", "query", "status", "current_step", "created_at", "started_at",
                             "completed_at", "error", "result_json", "export_path", "incharge", "alloted_to",
                         )),
                     )
+                    inserted = cursor.fetchone()
+                    if inserted:
+                        imported_job_ids.add(inserted[0])
                 for row in events:
+                    if row["job_id"] not in imported_job_ids:
+                        continue
                     cursor.execute(
                         """INSERT INTO marketing_agent_job_events
-                        (id, job_id, created_at, step, status, message)
-                        VALUES (%s, %s, %s, %s, %s, %s)""",
-                        tuple(row[key] for key in ("id", "job_id", "created_at", "step", "status", "message")),
+                        (job_id, created_at, step, status, message)
+                        VALUES (%s, %s, %s, %s, %s)""",
+                        tuple(row[key] for key in ("job_id", "created_at", "step", "status", "message")),
                     )
                 for row in uploads:
                     cursor.execute(
                         """INSERT INTO marketing_agent_crm_uploads
                         (id, job_id, source_type, file_name, status, item_count, response_json,
                          error, created_at, completed_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (id) DO NOTHING""",
                         tuple(row[key] for key in (
                             "id", "job_id", "source_type", "file_name", "status", "item_count",
                             "response_json", "error", "created_at", "completed_at",
                         )),
                     )
-                cursor.execute(
-                    """SELECT setval(pg_get_serial_sequence('marketing_agent_job_events', 'id'),
-                       GREATEST(COALESCE((SELECT MAX(id) FROM marketing_agent_job_events), 1), 1),
-                       EXISTS(SELECT 1 FROM marketing_agent_job_events))"""
-                )
     finally:
         pg.close()
 
-    print(f"Imported {len(jobs)} jobs, {len(events)} events, and {len(uploads)} CRM upload records.")
+    print(
+        f"Imported {len(imported_job_ids)} jobs and their events; "
+        f"processed {len(uploads)} CRM upload records. Existing matching IDs were skipped."
+    )
     return 0
 
 
