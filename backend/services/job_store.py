@@ -1,6 +1,11 @@
-"""SQLite-backed storage for frontend lead-generation jobs."""
+"""Persistent storage for frontend lead-generation jobs.
+
+PostgreSQL is used when DATABASE_URL is configured. SQLite remains the local
+fallback and can also be selected explicitly by passing database_path.
+"""
 
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -9,25 +14,110 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from psycopg2 import connect as pg_connect
+from psycopg2.extras import RealDictCursor
+
+from core.config import settings
+
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
+class _PostgresConnection:
+    """Small compatibility layer so the existing store methods work on both DBs."""
+
+    _tables = {"jobs": "marketing_agent_jobs", "job_events": "marketing_agent_job_events", "crm_uploads": "marketing_agent_crm_uploads"}
+
+    def __init__(self, dsn: str):
+        self._connection = pg_connect(dsn)
+        self._connection.autocommit = True
+
+    def execute(self, sql: str, params: tuple = ()):
+        for old, new in self._tables.items():
+            sql = re.sub(rf"\b{old}\b", new, sql)
+        sql = sql.replace("?", "%s")
+        cursor = self._connection.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(sql, params)
+        return cursor
+
+    def executescript(self, sql: str) -> None:
+        for statement in sql.split(";"):
+            if statement.strip():
+                self.execute(statement)
+
+    def table_columns(self, table: str) -> set[str]:
+        cursor = self.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            (self._tables[table],),
+        )
+        return {row["column_name"] for row in cursor.fetchall()}
+
+    def close(self) -> None:
+        self._connection.close()
+
+
 class JobStore:
-    def __init__(self, database_path: Path | str = BACKEND_DIR / "data" / "jobs.sqlite3"):
-        self._path = Path(database_path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        database_path: Path | str | None = None,
+        *,
+        database_url: str | None = None,
+    ):
+        # Explicit paths preserve SQLite behavior for tests and local tools.
+        # The deployed app uses the existing CMS PostgreSQL URL by default.
+        self._database_url = database_url if database_url is not None else (
+            None if database_path is not None else settings.DATABASE_URL
+        )
+        self._path = Path(database_path or BACKEND_DIR / "data" / "jobs.sqlite3")
+        if not self._database_url:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._initialize()
         self._reconcile_orphaned_jobs()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self):
+        if self._database_url:
+            return _PostgresConnection(self._database_url)
         connection = sqlite3.connect(self._path, timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
         return connection
 
     def _initialize(self) -> None:
         with closing(self._connect()) as connection:
+            if self._database_url:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS marketing_agent_jobs (
+                        id TEXT PRIMARY KEY, query TEXT NOT NULL, status TEXT NOT NULL,
+                        current_step TEXT, created_at TEXT NOT NULL, started_at TEXT,
+                        completed_at TEXT, error TEXT, result_json TEXT, export_path TEXT,
+                        incharge TEXT NOT NULL DEFAULT '', alloted_to TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS marketing_agent_job_events (
+                        id BIGSERIAL PRIMARY KEY, job_id TEXT NOT NULL REFERENCES marketing_agent_jobs(id),
+                        created_at TEXT NOT NULL, step TEXT, status TEXT NOT NULL, message TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS marketing_agent_crm_uploads (
+                        id TEXT PRIMARY KEY, job_id TEXT, source_type TEXT NOT NULL,
+                        file_name TEXT NOT NULL, status TEXT NOT NULL, item_count INTEGER NOT NULL DEFAULT 0,
+                        response_json TEXT, error TEXT, created_at TEXT NOT NULL, completed_at TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS marketing_agent_jobs_created_at_idx
+                        ON marketing_agent_jobs(created_at DESC);
+                    CREATE INDEX IF NOT EXISTS marketing_agent_events_job_id_idx
+                        ON marketing_agent_job_events(job_id, id);
+                    CREATE INDEX IF NOT EXISTS marketing_agent_uploads_created_at_idx
+                        ON marketing_agent_crm_uploads(created_at DESC);
+                    """
+                )
+                columns = connection.table_columns("jobs")
+                for name in ("incharge", "alloted_to"):
+                    if name not in columns:
+                        connection.execute(
+                            f"ALTER TABLE jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                        )
+                return
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
