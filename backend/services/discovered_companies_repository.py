@@ -20,6 +20,7 @@ from config.geography import (
     classify_location,
     city_for_locality,
     location_query_variants,
+    location_label_key,
     parse_address_components,
 )
 from config.targeting import match_target_industry
@@ -405,7 +406,7 @@ class DiscoveredCompaniesRepository:
         """
         normalized_locations: dict[str, list[str]] = {}
         for stored_location in stored_locations:
-            key = cls._normalize_location_key(stored_location)
+            key = location_label_key(stored_location)
             if key:
                 normalized_locations.setdefault(key, []).append(stored_location)
 
@@ -413,7 +414,7 @@ class DiscoveredCompaniesRepository:
         for terms in term_groups:
             resolved_terms = list(terms)
             for term in terms:
-                key = cls._normalize_location_key(term)
+                key = location_label_key(term)
                 if key:
                     resolved_terms.extend(normalized_locations.get(key, []))
             resolved_groups.append(list(dict.fromkeys(resolved_terms)))

@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -176,6 +177,25 @@ def canonical_district(value: Optional[str]) -> Optional[str]:
          if re.search(r"\b" + re.escape(district.lower()) + r"\b", text)),
         None,
     )
+
+
+def location_label_key(value: Optional[str]) -> str:
+    """Normalize a place label while allowing optional city/district suffixes.
+
+    Discovery rows may store ``Tenkasi district`` while people search for
+    ``Tenkasi``. Strip only trailing administrative labels so this remains an
+    exact place-name comparison and does not turn localities into their parent
+    districts.
+    """
+    decomposed = unicodedata.normalize("NFKD", value or "").casefold()
+    without_marks = "".join(
+        character for character in decomposed
+        if not unicodedata.category(character).startswith("M")
+    )
+    tokens = re.sub(r"[^\w]+", " ", without_marks).split()
+    while tokens and tokens[-1] in {"district", "city"}:
+        tokens.pop()
+    return " ".join(tokens)
 
 
 def location_query_variants(location: Optional[str]) -> "list[Optional[str]]":
@@ -378,6 +398,19 @@ def classify_location(
     # district precision instead of only ever reaching the broader state
     # fallback inside it.
     requested_locality = canonical_locality(requested)
+    if not requested_locality and "," not in requested:
+        source_locations = (
+            [company_source_locations]
+            if isinstance(company_source_locations, str)
+            else company_source_locations or []
+        )
+        requested_key = location_label_key(requested)
+        if requested_key and any(
+            location_label_key(component) == requested_key
+            for item in source_locations
+            for component in str(item).split(",")
+        ):
+            return "match", f"source location confirms requested place '{requested}'"
     # Geoapify can return a locality (for example, Ambattur) in its
     # ``district`` slot. If the requested place is already recognized as a
     # locality, do not let that broader district branch run first: compare
