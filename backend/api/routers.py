@@ -56,8 +56,6 @@ def crm_logout(x_crm_session: Optional[str] = Header(default=None)):
     logout(x_crm_session)
     return {'ok': True}
 
-COMPANY_HOURLY_STATS_URL = "http://217.217.249.121:8041/stats/companies/hourly"
-
 job_service = JobService()
 existing_data_service = ExistingDataService()
 mlead_repository = MleadRepository()
@@ -77,7 +75,7 @@ async def get_hourly_company_stats():
     """Proxy hourly company statistics for the dashboard."""
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(COMPANY_HOURLY_STATS_URL)
+            response = await client.get(settings.DISCOVERY_COMPANY_STATS_URL)
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as exc:

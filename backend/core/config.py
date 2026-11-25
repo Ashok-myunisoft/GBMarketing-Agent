@@ -178,6 +178,11 @@ class Settings:
     # Separate, read-only source for lead discovery. Do not reuse DATABASE_URL:
     # it belongs to the existing TLead/Mautic persistence paths.
     DISCOVERED_COMPANIES_DATABASE_URL = os.getenv("DISCOVERED_COMPANIES_DATABASE_URL")
+    # Discovery Agent endpoint used by the dashboard's Total companies card.
+    DISCOVERY_COMPANY_STATS_URL = os.getenv(
+        "DISCOVERY_COMPANY_STATS_URL",
+        "http://156.67.105.109:8041/stats/companies/hourly?hours=24",
+    )
 
     POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))

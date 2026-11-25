@@ -352,8 +352,32 @@ class ValidationAgent(BaseClass):
 
     @staticmethod
     def _company_keys(company: Company) -> set[str]:
+        """Build validation keys, including a fallback for missing industry.
+
+        ``public."TLead"`` contains legacy rows with a company name and city
+        but a NULL ``industry_type``. The old composite key required all
+        three fields, so those rows could never match a later discovery of
+        the same company. Keep the existing industry-aware key and also add
+        a normalized company+location key. This lets known companies match
+        when industry is absent or differs between source rows.
+        """
+        keys: set[str] = set()
         key = company_composite_key(company)
-        return {key} if key else set()
+        if key:
+            keys.add(key)
+
+        def normalize(value: Optional[str]) -> str:
+            return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
+
+        name = normalize(company.company_name)
+        location_value = (
+            company.city or company.locality or company.district
+            or company.state or company.address
+        )
+        location = normalize(location_value)
+        if name and location:
+            keys.add(f"company:{name}|location:{location}")
+        return keys
 
     @staticmethod
     def _merge_baseline_indexes(target: dict, source: dict) -> None:
