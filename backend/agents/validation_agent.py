@@ -243,7 +243,23 @@ class ValidationAgent(BaseClass):
                 # This is the point the existing workflow treats a lead as
                 # actually accepted (not merely discovered) - the correct
                 # insertion point for the persistent PostgreSQL baseline.
-                self._remember_in_mlead(accepted, keys, postgres_key_to_id)
+                lead_id = self._remember_in_mlead(accepted, keys, postgres_key_to_id)
+
+                # Also make this accepted lead part of the current validation
+                # baseline. The baseline is loaded once at the start of this
+                # execute() call; without this update, a duplicate source row
+                # later in the same batch is not compared with the lead we just
+                # accepted and can be inserted into TLead a second time.
+                current_reference = {
+                    "source": (
+                        'PostgreSQL public."TLead"'
+                        if lead_id is not None else "current validation run"
+                    ),
+                    "record_id": str(lead_id) if lead_id is not None else None,
+                    "identity_keys": keys,
+                }
+                for key in keys:
+                    baseline_index.setdefault(key, []).append(current_reference)
             else:
                 rejected_count += 1
                 removed.append({
@@ -418,7 +434,12 @@ class ValidationAgent(BaseClass):
             logger.exception('mlead: failed to read PostgreSQL baseline (public."TLead"); continuing without it')
             return []
 
-    def _remember_in_mlead(self, company: Company, keys: set[str], postgres_key_to_id: dict[str, int]) -> None:
+    def _remember_in_mlead(
+        self,
+        company: Company,
+        keys: set[str],
+        postgres_key_to_id: dict[str, int],
+    ) -> Optional[int]:
         """Insert a newly accepted lead into public."TLead" so future runs
         (including after a container restart) recognise it via the
         existing dedup keys.
@@ -461,11 +482,13 @@ class ValidationAgent(BaseClass):
             # the same run that matches this one is skipped, not re-inserted.
             for key in keys:
                 postgres_key_to_id[key] = new_id
+            return new_id
         except Exception:
             logger.exception(
                 'mlead: failed to persist accepted lead \'%s\' to PostgreSQL (public."TLead")',
                 company.company_name,
             )
+            return None
 
     def _backfill_mlead(self, lead_id: int, company: Company) -> None:
         """Fills in any blank column on an EXISTING mlead row with this
